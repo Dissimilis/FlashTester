@@ -16,17 +16,58 @@ Finds out whether a USB stick, SD card or other disk really stores what it claim
 - **Reports:** a plain verdict, a detailed HTML report, JSON, exit codes, and a one-page evidence sheet for refund claims.
 - **Fix:** repartition a fake drive to the capacity that really works.
 
-Windows is kept awake while a test runs. One file, `flashtester.exe`, no installer. Run it without arguments for the GUI, with arguments for the command line. Windows 10/11, 64-bit.
+## The GUI
 
-In the GUI, the drive list on the left offers each volume (file mode: tests free space, keeps your files) and the whole disk (raw mode: tests everything, erases it). Whole-disk tests are shown in red and need a confirmation tick. Tests that need administrator rights say so and offer to restart FlashTester elevated.
+The drive list on the left offers each volume (file mode: tests free space, keeps your files) and each whole disk (raw mode: tests everything, erases it). Pick one, pick a test, and the panel on the right explains what the test does and what it will touch. Whole-disk tests are shown in red and need a confirmation tick. Tests that need administrator rights say so and offer to restart FlashTester elevated. While a test runs, the block map and speed graph fill in; at the end you get the verdict, the next sensible step and buttons for the reports.
 
 ![Setting up a full test on a volume](website/screenshot-setup.png)
 
-**Linux:** GUI and command line, as one static file (`flashtester-linux-x86_64` or `flashtester-linux-aarch64`; no dependencies, any distribution). Started without arguments inside an X11 desktop, or a Wayland desktop with XWayland, it opens the same GUI; "Restart as root" goes through `pkexec`. Elsewhere it runs as a command-line tool. Disks go by their kernel names (`--disk sdb`, `--disk nvme1n1`, `--disk mmcblk1`); file mode takes a mount point (`flashtester test /mnt/usb`). Raw-disk commands need root, and a disk must be unmounted before raw writes. `fix` uses `sfdisk` and `mkfs.*` (`--fs ext4` is also available); the free-space probe needs a file system with `fallocate` and `FIEMAP`, such as ext4 or xfs.
+## Download and run
 
-**OpenWrt:** use the static binary for the router's CPU (`flashtester-linux-aarch64` on most current routers, `-x86_64` on x86 builds). A USB stick only appears as a disk once its driver is installed: `kmod-usb-storage`, and for most USB 3 sticks also `kmod-usb-storage-uas` (without it a UAS stick is detected on the USB bus but never becomes `/dev/sdX`). `fix` needs `sfdisk` and a formatter (`exfat-mkfs` for exFAT, `e2fsprogs` for ext4). Install them with `apk add` (OpenWrt 25.12 and later) or `opkg install` (older releases).
+One self-contained file per platform: no installer, no dependencies. Started without arguments it opens the GUI (where there is one); with arguments it runs on the command line.
 
-**FreeBSD:** command line only, as one static file (`flashtester-freebsd-x86_64`, amd64; built against FreeBSD 14.5, runs on 13.5 to 16.0). Disks go by their device names (`--disk da0`, `--disk ada1`, `--disk nda0`); file mode takes a mount point and works on UFS, FAT and ZFS. Raw-disk commands need root, and FreeBSD refuses raw writes while anything on the disk is mounted, used as swap, or held by ZFS or another GEOM layer (mirror, geli). `fix` uses `gpart` with `newfs_msdos` (`--fs fat32`, the default) or `newfs` (`--fs ufs`): the base system has no exFAT or NTFS formatter. The free-space probe is not available, because FreeBSD cannot report where a file's blocks are on the disk.
+| Platform | File | Interface |
+|---|---|---|
+| Windows 10 / 11, 64-bit | `flashtester.exe` | GUI and command line |
+| Linux x86_64, any distribution | `flashtester-linux-x86_64` | GUI (X11 or XWayland) and command line |
+| Linux aarch64 (64-bit ARM: Raspberry Pi with a 64-bit OS, ARM boards, routers) | `flashtester-linux-aarch64` | GUI (X11 or XWayland) and command line |
+| FreeBSD 13.5 to 16.0, amd64 | `flashtester-freebsd-x86_64` | command line |
+
+### Windows
+
+- Run `flashtester.exe`. Volumes go by drive letter (`flashtester test E:`), whole disks by the number `flashtester list` shows (`--disk 3`).
+- File-mode tests run as a normal user. Raw-mode tests and the free-space probe need an administrator terminal; the GUI offers to restart elevated.
+- Windows is kept awake while a test runs.
+- The GUI needs OpenGL. Where there is none (for example a remote desktop without a GPU), use the command line.
+
+### Linux
+
+```sh
+chmod +x flashtester-linux-x86_64
+./flashtester-linux-x86_64                  # GUI, inside an X11 or Wayland (XWayland) desktop
+./flashtester-linux-x86_64 test /media/you/STICK
+sudo ./flashtester-linux-x86_64 probe --disk sdb --destroy
+```
+
+- Volumes go by mount point, whole disks by kernel name (`--disk sdb`, `--disk nvme1n1`, `--disk mmcblk1`).
+- Raw-mode tests and the free-space probe need root, and raw writes need the disk unmounted. In the GUI, "Restart as root" goes through `pkexec`.
+- `fix` uses `sfdisk` and `mkfs.*` (`--fs exfat`, `fat32`, `ntfs` or `ext4`).
+- The free-space probe needs a file system with `fallocate` and `FIEMAP`, such as ext4 or xfs.
+
+### OpenWrt
+
+- Use `flashtester-linux-aarch64` on most current routers and `flashtester-linux-x86_64` on x86 builds. Routers with MIPS or 32-bit ARM CPUs are not supported.
+- A USB stick only appears as a disk once its driver is installed: `kmod-usb-storage`, and for most USB 3 sticks also `kmod-usb-storage-uas` (without it, a UAS stick shows up on the USB bus but never becomes `/dev/sdX`).
+- `fix` needs `sfdisk` and a formatter: `exfat-mkfs` for exFAT, `e2fsprogs` for ext4.
+- Install packages with `apk add` (OpenWrt 25.12 and later) or `opkg install` (older releases).
+
+### FreeBSD
+
+- Command line only. Built against FreeBSD 14.5; runs on 13.5 to 16.0.
+- Volumes go by mount point (UFS, FAT and ZFS), whole disks by device name (`--disk da0`, `--disk ada1`, `--disk nda0`).
+- Raw-mode tests need root. FreeBSD refuses raw writes while anything on the disk is mounted, used as swap, or held by ZFS or another GEOM layer (mirror, geli).
+- `fix` uses `gpart` with `newfs_msdos` (`--fs fat32`, the default) or `newfs` (`--fs ufs`); the base system has no exFAT or NTFS formatter.
+- No free-space probe: FreeBSD cannot report where a file's blocks are on the disk. Use the raw probe on an empty drive, or a full test.
 
 ## Safety
 
@@ -40,6 +81,8 @@ flashtester test E:                    # fill free space, verify (like h2testw)
 flashtester probe --disk 3 --destroy   # real capacity in minutes (admin, destroys data)
 flashtester fix --disk 3 --destroy     # probe, then partition+format to the real size
 ```
+
+On Linux use a mount point and a kernel name (`test /media/you/STICK`, `--disk sdb`), on FreeBSD a device name (`--disk da0`).
 
 ## Commands
 
@@ -85,29 +128,7 @@ Cheap fakes ignore the high address bits, so writes past the real capacity wrap 
 - File mode tests free space only. Data already on the drive isn't checked, and on a fake drive filling free space can overwrite existing files (the fake wraps onto them). Back up first.
 - Software only sees errors the controller's error correction couldn't fix. There is no health or remaining-life percentage, by design.
 - Repartitioning a fake drive to its real size makes it usable; it doesn't make it trustworthy.
-- FreeBSD has no free-space probe (see above); use the raw probe on an empty drive, or a full test.
-
-## Tested
-
-On Windows 11 with a "128 GB" ADATA USB stick (VID 24A9, no vendor name, placeholder serial; genuine 126.66 GB):
-full file-mode test of all 126.66 GB (48 min write at 44 MB/s, 16 min read at 131 MB/s, 0 errors); raw probe in 8 s and free-space probe in 12 s, both genuine;
-raw 4 GB test and verify; surface scan of the whole disk; sequential bench; random 4K IOPS; small files; `fix`;
-unplug/replug (device disabled and re-enabled between write and verify); pull-the-plug (USB port power-cycled mid-write: all 805 MB confirmed by a flush survived, the 84 MB in flight was reported, not counted as a defect).
-On a 512 GB NVMe SSD in a Realtek RTL9210C USB enclosure (a fixed, non-removable disk like an internal drive): file-mode test, verify, bench, IOPS and small files; then raw probe (1 s), free-space probe, 16 GB raw test and verify, endurance, raw bench (332/398 MB/s write/read), random 4K writes, a surface scan of all 512 GB at 406 MB/s and `fix`. FlashTester flagged that the enclosure supports 10 Gbit/s but ran at 5 Gbit/s, and caught one run with unstable reads and 19 s stalls (a flaky link; the rerun was clean).
-The GUI was driven through Windows UI Automation (AccessKit): select a drive and a test, set a size limit, start it, tick the confirmation for a whole-disk test, read the verdict. The screenshots above come from a real 4 GB file-mode test of a Verbatim Store 'n' Go 64 GB stick.
-`test\vhd-test.ps1` runs 21 checks against a throwaway VHD, a fixed (non-removable) disk standing in for an internal drive, including the system-disk and junction guards. The machine's only internal disk holds Windows and is refused, as it must be.
-Fake-drive behaviour (wraparound, dropped writes, read-only) is covered by unit tests on a simulated drive.
-
-Linux, with the static binaries on five machines:
-- **OpenMediaVault NAS (Debian 13, x86_64):** non-destructive tests of the internal Verbatim SSD (btrfs) and a 4 TB USB HDD (exFAT) in a live backup pool: 2 GB file tests, verify, bench, IOPS, small files, 20 GB read-only scans. Full destructive suites on two USB sticks (probe, raw test, endurance, bench, random writes, scan, `fix`, file mode on ext4 including the free-space probe), each restored to its original file system afterwards. The system disk, `/` and the mergerfs pool were refused.
-- **Fedora 44 (x86_64), 1.92 TB Samsung SATA SSD in a 10 Gbit/s USB enclosure:** full destructive suite (raw 401/546 MB/s write/read), file mode on ext4, free-space probe across 1.92 TB in 10 s.
-- **ODROID C2 (Armbian, aarch64, USB 2.0), 125 GB generic USB stick:** full destructive suite, file mode on ext4 including the free-space probe, raw and file-mode replug, and pull-the-plug (USB de-authorized mid-write: all 134 MB confirmed by a flush survived). The SD card holding `/` was refused.
-- **ODROID N2+ (Armbian, aarch64):** identity, the system-disk guard (the SD card holding `/` is refused) and a raw probe of a Kingston DataTraveler 3.0 (genuine 31.00 GB). The stick then dropped off the USB bus during the raw write and did not re-enumerate; the full aarch64 suite ran on AWS instead.
-- **AWS Graviton4 (Ubuntu 26.04, aarch64), temporary 2 GB EBS volume:** full destructive suite, file mode on ext4 including the free-space probe, and replug and pull-the-plug tests using real EBS detach/attach (a forced detach mid-write: all 1.74 GB confirmed by a flush survived). The boot volume was refused.
-
-The Linux GUI was checked on Fedora 44 under Xvfb, showing every view with simulated drives; it has not yet been driven through a real test on Linux.
-
-FreeBSD, with the static binary in QEMU/KVM virtual machines, one per release: 13.5, 14.4, 14.5, 15.0, 15.1 and a 16.0-CURRENT snapshot (2026-10-12). Each ran the unit tests and the same suite on an emulated 2 GB USB stick and a second virtual disk: identity (USB IDs, serial, link speed), the system-disk guard, raw probe, 128 MB raw test, `fix` to FAT32 and to UFS, file-mode test and small files, refusal of a raw write while the stick was mounted, file mode on a ZFS pool, and swap on a file inside that pool, which made the pool's disk protected. All passed on every release; on the 16.0 snapshot the ZFS steps were skipped because its ZFS module didn't load on its own kernel. On 15.1 also: verify, surface scan, bench, random 4K IOPS, nullfs mounts (followed to the disk underneath; a nullfs view of the system disk is refused) and a file system on a file-backed memory disk (refused, like a Linux loop device). Not yet tested on FreeBSD hardware with a real stick.
+- FreeBSD has no free-space probe (see FreeBSD above).
 
 ## Building
 

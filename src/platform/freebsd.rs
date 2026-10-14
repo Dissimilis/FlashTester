@@ -430,7 +430,8 @@ fn bus(name: &str, cam: Option<&Cam>) -> String {
         "NVMe"
     } else if name.starts_with("mmcsd") || name.starts_with("sdda") {
         "MMC"
-    } else if name.starts_with("vtbd") || sim.starts_with("vtscsi") {
+    } else if name.starts_with("vtbd") {
+        // virtio-blk. Disks on virtio-scsi (vtscsi) stay SCSI: passed-through drives answer SMART.
         "Virtual"
     } else if ["mpr", "mps", "mpt", "isp", "ahc", "ahd", "mrsas", "ciss"].iter().any(|p| sim.starts_with(p)) {
         "SAS"

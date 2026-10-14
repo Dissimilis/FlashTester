@@ -442,7 +442,8 @@ fn disk_info(name: &str, ms: &[Mount]) -> Option<DiskInfo> {
         if t.is_empty() { "MMC".into() } else { t }
     } else if p.contains("/ata") {
         "SATA".into()
-    } else if p.contains("virtio") {
+    } else if p.contains("virtio") && !p.contains("/host") {
+        // virtio-blk. Disks on virtio-scsi stay SCSI: passed-through drives answer SMART.
         "Virtual".into()
     } else {
         "SCSI".into()

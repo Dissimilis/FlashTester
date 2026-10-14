@@ -243,7 +243,7 @@ pub fn read(d: &DiskInfo) -> Result<Smart, String> {
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     // The disk number may name another device by now (replug): bridge commands
     // must only go to the bridge they were chosen for.
-    let ids = |x: &DiskInfo| (x.instance_id.clone(), x.serial.clone(), x.usb.as_ref().map(|u| (u.vid.to_uppercase(), u.pid.to_uppercase())));
+    let ids = |x: &DiskInfo| (x.instance_id.clone(), x.serial.clone(), x.product.clone(), x.size, x.usb.as_ref().map(|u| (u.vid.to_uppercase(), u.pid.to_uppercase())));
     let now = platform::disk(&d.id).map_err(|e| e.to_string())?;
     if ids(&now) != ids(d) {
         return Err("The disk was replaced by another device.".into());
@@ -283,6 +283,8 @@ fn bridged(d: &DiskInfo, b: Bridge, op: u8, nsid: u32, cdw10: u32, len: usize) -
             c[0] = 0xE6;
             c[1] = op;
             c[3] = cdw10 as u8;
+            // The upper half of CDW10, big-endian.
+            c[6] = (cdw10 >> 24) as u8;
             c[7] = (cdw10 >> 16) as u8;
         }
     }

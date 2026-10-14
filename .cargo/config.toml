@@ -1,0 +1,24 @@
+# Static Linux builds from any host: Rust's bundled lld and musl CRT, no C toolchain.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=ld.lld", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=ld.lld", "-C", "target-feature=+crt-static"]
+
+# Static FreeBSD build: the same lld, with FreeBSD's own startup files and static
+# libraries from its base.txz unpacked into target/freebsd-sysroot (debug sections
+# stripped: this lld has no zlib). The release workflow shows how to get them.
+[target.x86_64-unknown-freebsd]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=ld.lld", "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-Ltarget/freebsd-sysroot/usr/lib",
+    "-C", "link-arg=target/freebsd-sysroot/usr/lib/crt1.o",
+    "-C", "link-arg=target/freebsd-sysroot/usr/lib/crti.o",
+    "-C", "link-arg=target/freebsd-sysroot/usr/lib/crtbeginT.o",
+    "-C", "link-arg=-lc", "-C", "link-arg=-lthr", "-C", "link-arg=-lm", "-C", "link-arg=-lgcc", "-C", "link-arg=-lgcc_eh",
+    "-C", "link-arg=target/freebsd-sysroot/usr/lib/crtend.o",
+    "-C", "link-arg=target/freebsd-sysroot/usr/lib/crtn.o",
+]

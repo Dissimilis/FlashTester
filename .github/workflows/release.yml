@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (GNU toolchain)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --component llvm-tools
+          rustup default stable-x86_64-pc-windows-gnu
+      - name: Test
+        run: cargo test --release
+      - name: Build
+        run: cargo build --release
+      - name: Single-exe check (imports only Windows DLLs)
+        shell: pwsh
+        run: ./test/check-imports.ps1 -ExePath target/release/flashtester.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flashtester
+          path: target/release/flashtester.exe
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/flashtester.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust with static musl and FreeBSD targets
+        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-unknown-freebsd
+      - name: Test
+        run: cargo test --release
+      # FreeBSD links against its own startup files and static libraries, from the
+      # official base.txz (pinned). Rust's lld has no zlib, so their compressed debug
+      # sections go.
+      - name: FreeBSD sysroot
+        run: |
+          curl -fsSLo base.txz https://download.freebsd.org/releases/amd64/14.5-RELEASE/base.txz
+          echo "d16b68fe0e9e136ce67ab1084042c848bbffecd1eb295f206bd1c6785deb45a4  base.txz" | sha256sum -c
+          mkdir -p target/freebsd-sysroot
+          tar -xJf base.txz -C target/freebsd-sysroot ./usr/lib/crt1.o ./usr/lib/crti.o ./usr/lib/crtn.o ./usr/lib/crtbeginT.o ./usr/lib/crtend.o \
+            $(for l in c thr pthread m gcc gcc_eh compiler_rt execinfo util rt elf kvm memstat procstat devstat; do echo ./usr/lib/lib$l.a; done)
+          chmod -R u+w target/freebsd-sysroot
+          find target/freebsd-sysroot -type f -exec objcopy --strip-debug {} \;
+      # .cargo/config.toml links all three with Rust's bundled lld: no cross C toolchain.
+      - name: Build static binaries
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+          cargo build --release --target aarch64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-freebsd
+          mkdir dist
+          cp target/x86_64-unknown-linux-musl/release/flashtester dist/flashtester-linux-x86_64
+          cp target/aarch64-unknown-linux-musl/release/flashtester dist/flashtester-linux-aarch64
+          cp target/x86_64-unknown-freebsd/release/flashtester dist/flashtester-freebsd-x86_64
+          file dist/*
+          ! ldd dist/flashtester-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flashtester-linux-freebsd
+          path: dist/*
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

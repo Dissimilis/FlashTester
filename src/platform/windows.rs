@@ -1,0 +1,758 @@
+//! Windows: disk and volume enumeration, drive identity, USB link speed, the
+//! system-disk guard, raw disk access, elevation, free-space mapping, diskpart.
+
+use super::{DiskInfo, UsbInfo, VolumeInfo};
+use crate::dev::{ALIGN, Dev, FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH};
+use std::collections::BTreeMap;
+use std::ffi::c_void;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::os::windows::io::AsRawHandle;
+use std::path::{Path, PathBuf};
+use windows_sys::Win32::Devices::DeviceAndDriverInstallation as di;
+use windows_sys::Win32::Storage::FileSystem as fs;
+use windows_sys::core::GUID;
+
+const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
+const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
+const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 = 0x0007_00A0;
+const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
+const IOCTL_DISK_IS_WRITABLE: u32 = 0x0007_0024;
+const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
+const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
+const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
+const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
+pub const FSCTL_GET_RETRIEVAL_POINTERS: u32 = 0x0009_0073;
+pub const FSCTL_GET_RETRIEVAL_POINTER_BASE: u32 = 0x0009_0234;
+const IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX: u32 = 0x0022_0448;
+const IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2: u32 = 0x0022_045C;
+
+const GUID_DEVINTERFACE_DISK: GUID = GUID::from_u128(0x53f56307_b6bf_11d0_94f2_00a0c91efb8b);
+const GUID_DEVINTERFACE_USB_HUB: GUID = GUID::from_u128(0xf18a0e88_c30c_11d0_8815_00a0c906bed8);
+
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+fn from_wide(b: &[u16]) -> String {
+    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    String::from_utf16_lossy(&b[..end])
+}
+
+fn multi_sz(b: &[u16]) -> Vec<String> {
+    b.split(|&c| c == 0).filter(|s| !s.is_empty()).map(String::from_utf16_lossy).collect()
+}
+
+pub fn is_admin() -> bool {
+    unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
+}
+
+fn open_dev(path: &str, access: u32) -> io::Result<File> {
+    OpenOptions::new().access_mode(access).share_mode(3).open(path)
+}
+
+pub fn ioctl(f: &File, code: u32, inp: &[u8], out: &mut [u8]) -> io::Result<usize> {
+    let mut ret = 0u32;
+    let ok = unsafe {
+        windows_sys::Win32::System::IO::DeviceIoControl(
+            f.as_raw_handle() as _,
+            code,
+            if inp.is_empty() { std::ptr::null() } else { inp.as_ptr() as *const c_void },
+            inp.len() as u32,
+            if out.is_empty() { std::ptr::null_mut() } else { out.as_mut_ptr() as *mut c_void },
+            out.len() as u32,
+            &mut ret,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(ret as usize) }
+}
+
+fn u32_at(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
+}
+fn u64_at(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
+}
+fn cstr_at(b: &[u8], o: usize) -> String {
+    if o == 0 || o >= b.len() {
+        return String::new();
+    }
+    let end = b[o..].iter().position(|&c| c == 0).map(|p| o + p).unwrap_or(b.len());
+    // Some devices pad with control bytes; keep printable ASCII only.
+    b[o..end].iter().filter(|c| (0x20..0x7f).contains(*c)).map(|&c| c as char).collect::<String>().trim().to_string()
+}
+
+fn bus_name(t: u32) -> &'static str {
+    match t {
+        1 => "SCSI",
+        2 => "ATAPI",
+        3 => "ATA",
+        4 => "1394",
+        6 => "Fibre",
+        7 => "USB",
+        8 => "RAID",
+        9 => "iSCSI",
+        10 => "SAS",
+        11 => "SATA",
+        12 => "SD",
+        13 => "MMC",
+        14 => "Virtual",
+        15 => "File-backed virtual",
+        16 => "Storage Spaces",
+        17 => "NVMe",
+        18 => "SCM",
+        19 => "UFS",
+        _ => "Unknown",
+    }
+}
+
+/// Disk byte extents of a volume (`\\?\Volume{..}` without trailing slash, or a GLOBALROOT path).
+fn extents(vol_path: &str) -> io::Result<Vec<(String, u64, u64)>> {
+    let f = open_dev(vol_path, 0)?;
+    let mut out = vec![0u8; 8 + 24 * 32];
+    ioctl(&f, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &[], &mut out)?;
+    let n = u32_at(&out, 0) as usize;
+    Ok((0..n.min(32)).map(|i| (u32_at(&out, 8 + i * 24).to_string(), u64_at(&out, 16 + i * 24), u64_at(&out, 24 + i * 24))).collect())
+}
+
+pub fn list_volumes() -> Vec<VolumeInfo> {
+    let mut out = vec![];
+    let mut buf = [0u16; 512];
+    let h = unsafe { fs::FindFirstVolumeW(buf.as_mut_ptr(), buf.len() as u32) };
+    if h as isize == -1 {
+        return out;
+    }
+    loop {
+        out.push(volume_info(&from_wide(&buf)));
+        if unsafe { fs::FindNextVolumeW(h, buf.as_mut_ptr(), buf.len() as u32) } == 0 {
+            break;
+        }
+    }
+    unsafe { fs::FindVolumeClose(h) };
+    out
+}
+
+/// Details of a volume given its `\\?\Volume{...}\` name.
+fn volume_info(guid: &str) -> VolumeInfo {
+    let mut v = VolumeInfo { guid: guid.to_string(), ..Default::default() };
+    let wg = wide(guid);
+    let mut names = vec![0u16; 1024];
+    let mut len = 0u32;
+    if unsafe { fs::GetVolumePathNamesForVolumeNameW(wg.as_ptr(), names.as_mut_ptr(), names.len() as u32, &mut len) } != 0 {
+        v.mount_points = multi_sz(&names[..len as usize]);
+    }
+    let mut label = [0u16; 261];
+    let mut fsname = [0u16; 64];
+    let (mut serial, mut maxc, mut flags) = (0u32, 0u32, 0u32);
+    if unsafe { fs::GetVolumeInformationW(wg.as_ptr(), label.as_mut_ptr(), 261, &mut serial, &mut maxc, &mut flags, fsname.as_mut_ptr(), 64) } != 0 {
+        v.label = from_wide(&label);
+        v.fs = from_wide(&fsname);
+    }
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    if unsafe { fs::GetDiskFreeSpaceExW(wg.as_ptr(), &mut avail, &mut total, &mut free) } != 0 {
+        v.size = total;
+        v.free = avail;
+    }
+    v.extents = extents(guid.trim_end_matches('\\')).unwrap_or_default();
+    if v.size == 0 {
+        v.size = v.extents.iter().map(|e| e.2).sum();
+    }
+    v
+}
+
+/// The volume containing `path`.
+pub fn volume_of_path(path: &Path) -> io::Result<VolumeInfo> {
+    let p = wide(&path.to_string_lossy());
+    let mut mp = [0u16; 512];
+    if unsafe { fs::GetVolumePathNameW(p.as_ptr(), mp.as_mut_ptr(), 512) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut guid = [0u16; 128];
+    if unsafe { fs::GetVolumeNameForVolumeMountPointW(mp.as_ptr(), guid.as_mut_ptr(), 128) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(volume_info(&from_wide(&guid)))
+}
+
+/// Ok(None) if the value doesn't exist; Err if it exists but can't be read.
+fn reg_value(key: &str, name: &str, multi: bool) -> io::Result<Option<Vec<String>>> {
+    use windows_sys::Win32::System::Registry::*;
+    let (k, n) = (wide(key), wide(name));
+    let mut buf = vec![0u16; 4096];
+    let mut size = (buf.len() * 2) as u32;
+    let flags = if multi { RRF_RT_REG_MULTI_SZ } else { RRF_RT_REG_SZ };
+    let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, k.as_ptr(), n.as_ptr(), flags, std::ptr::null_mut(), buf.as_mut_ptr() as *mut c_void, &mut size) };
+    match r {
+        0 => Ok(Some(multi_sz(&buf[..size as usize / 2]))),
+        2 => Ok(None),
+        e => Err(io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+/// Disks that must never be tested, with the reason. Fails closed: an error
+/// means the system disk could not be identified.
+pub fn protected_disks() -> io::Result<BTreeMap<String, String>> {
+    let mut m = BTreeMap::new();
+    let mut add = |ext: &[(String, u64, u64)], why: &str| {
+        for e in ext {
+            m.entry(e.0.clone()).or_insert_with(|| why.to_string());
+        }
+    };
+    let mut wd = [0u16; 260];
+    let n = unsafe { windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW(wd.as_mut_ptr(), 260) };
+    if n == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let windir = from_wide(&wd);
+    let v = volume_of_path(Path::new(&windir))?;
+    if v.extents.is_empty() {
+        return Err(io::Error::other("cannot map the Windows volume to a disk"));
+    }
+    add(&v.extents, &format!("system disk (holds {windir})"));
+    // Boot partition and page files: failing to find or map them is an error, or the
+    // boot (EFI) partition's disk would go unprotected.
+    let sp = reg_value("SYSTEM\\Setup", "SystemPartition", false)?
+        .and_then(|v| v.into_iter().next())
+        .ok_or_else(|| io::Error::other("cannot find the boot partition (HKLM\\SYSTEM\\Setup\\SystemPartition)"))?;
+    let e = extents(&format!("\\\\?\\GLOBALROOT{sp}")).map_err(|e| io::Error::other(format!("cannot map the boot partition {sp}: {e}")))?;
+    add(&e, "holds the boot (system) partition");
+    let mm = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management";
+    for pf in reg_value(mm, "ExistingPageFiles", true)?.unwrap_or_default() {
+        // "\??\C:\pagefile.sys"
+        let p = pf.trim_start_matches("\\??\\");
+        let v = volume_of_path(Path::new(p))?;
+        if v.extents.is_empty() {
+            return Err(io::Error::other(format!("cannot map page file {p} to a disk")));
+        }
+        add(&v.extents, "holds a page file");
+    }
+    // A VHD-booted or Storage Spaces system sits on physical disks this list can't see.
+    for n in m.keys() {
+        if let Ok(f) = open_dev(&format!("\\\\.\\PhysicalDrive{n}"), 0) {
+            let mut desc = vec![0u8; 1024];
+            if ioctl(&f, IOCTL_STORAGE_QUERY_PROPERTY, &[0u8; 12], &mut desc).is_ok() && matches!(u32_at(&desc, 28), 14..=16) {
+                return Err(io::Error::other(format!("the system disk (disk {n}) is a virtual disk or Storage Space; its physical disks can't be identified")));
+            }
+        }
+    }
+    Ok(m)
+}
+
+fn cm_id(devinst: u32) -> String {
+    let mut buf = [0u16; 512];
+    if unsafe { di::CM_Get_Device_IDW(devinst, buf.as_mut_ptr(), 512, 0) } != 0 {
+        return String::new();
+    }
+    from_wide(&buf)
+}
+
+fn cm_parent(devinst: u32) -> Option<u32> {
+    let mut p = 0u32;
+    (unsafe { di::CM_Get_Parent(&mut p, devinst, 0) } == 0).then_some(p)
+}
+
+/// Device interface paths (and devinst) of a class, optionally limited to one device instance id.
+fn interfaces(guid: &GUID, instance: Option<&str>) -> Vec<(String, u32)> {
+    let mut out = vec![];
+    let inst = instance.map(wide);
+    let h = unsafe {
+        di::SetupDiGetClassDevsW(guid, inst.as_ref().map_or(std::ptr::null(), |w| w.as_ptr()), std::ptr::null_mut(), di::DIGCF_PRESENT | di::DIGCF_DEVICEINTERFACE)
+    };
+    if h == -1 {
+        return out;
+    }
+    for i in 0.. {
+        let mut ifd: di::SP_DEVICE_INTERFACE_DATA = unsafe { std::mem::zeroed() };
+        ifd.cbSize = size_of::<di::SP_DEVICE_INTERFACE_DATA>() as u32;
+        if unsafe { di::SetupDiEnumDeviceInterfaces(h, std::ptr::null(), guid, i, &mut ifd) } == 0 {
+            break;
+        }
+        let mut buf = vec![0u32; 512];
+        // SP_DEVICE_INTERFACE_DETAIL_DATA_W: cbSize is 8 on 64-bit
+        buf[0] = if cfg!(target_pointer_width = "64") { 8 } else { 6 };
+        let mut dev: di::SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+        dev.cbSize = size_of::<di::SP_DEVINFO_DATA>() as u32;
+        let ok = unsafe { di::SetupDiGetDeviceInterfaceDetailW(h, &ifd, buf.as_mut_ptr() as *mut _, (buf.len() * 4) as u32, std::ptr::null_mut(), &mut dev) };
+        if ok != 0 {
+            let words = unsafe { std::slice::from_raw_parts((buf.as_ptr() as *const u16).add(2), buf.len() * 2 - 2) };
+            out.push((from_wide(words), dev.DevInst));
+        }
+    }
+    unsafe { di::SetupDiDestroyDeviceInfoList(h) };
+    out
+}
+
+fn usb_speed_name(s: u8) -> &'static str {
+    match s {
+        0 => "USB 1.x Low Speed (1.5 Mbit/s)",
+        1 => "USB 1.x Full Speed (12 Mbit/s)",
+        2 => "USB 2.0 High Speed (480 Mbit/s)",
+        3 => "USB 3.x SuperSpeed (5 Gbit/s)",
+        _ => "unknown",
+    }
+}
+
+/// Walk from a disk devnode up to its USB device and ask the hub about the link.
+fn usb_info(disk_devinst: u32) -> Option<UsbInfo> {
+    let mut d = disk_devinst;
+    let mut usb = None;
+    for _ in 0..8 {
+        d = cm_parent(d)?;
+        let id = cm_id(d);
+        let up = id.to_ascii_uppercase();
+        if up.starts_with("USB\\") && !up.contains("&MI_") {
+            usb = Some((d, id));
+            break;
+        }
+    }
+    let (dev, id) = usb?;
+    let up = id.to_ascii_uppercase();
+    let field = |k: &str| up.find(k).map(|i| up[i + k.len()..].chars().take(4).collect::<String>());
+    let serial = id.rsplit('\\').next().filter(|s| !s.contains('&')).map(|s| s.to_string());
+    let mut info = UsbInfo { vid: field("VID_").unwrap_or_default(), pid: field("PID_").unwrap_or_default(), serial, link: "unknown".into(), ..Default::default() };
+
+    let hub = cm_parent(dev)?;
+    let mut port = 0u32;
+    let mut sz = 4u32;
+    let mut ty = 0u32;
+    let r = unsafe { di::CM_Get_DevNode_Registry_PropertyW(dev, di::CM_DRP_ADDRESS, &mut ty, &mut port as *mut u32 as *mut c_void, &mut sz, 0) };
+    let hub_path = interfaces(&GUID_DEVINTERFACE_USB_HUB, Some(&cm_id(hub))).into_iter().next();
+    if r != 0 || hub_path.is_none() {
+        return Some(info);
+    }
+    let hub_path = hub_path.unwrap().0;
+    info.hub = hub_path.clone();
+    info.port = port;
+    let hf = open_dev(&hub_path, GENERIC_WRITE).or_else(|_| open_dev(&hub_path, 0));
+    let Ok(hf) = hf else { return Some(info) };
+    let mut b = vec![0u8; 512];
+    b[0..4].copy_from_slice(&port.to_le_bytes());
+    if ioctl(&hf, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, &b.clone(), &mut b).is_ok() {
+        // packed struct: descriptor at 4 (bcdUSB at 6, idVendor 12, idProduct 14), Speed at 23
+        let bcd = u16::from_le_bytes([b[6], b[7]]);
+        info.usb_version = format!("{:x}.{:02x}", bcd >> 8, bcd & 0xff);
+        info.vid = format!("{:04X}", u16::from_le_bytes([b[12], b[13]]));
+        info.pid = format!("{:04X}", u16::from_le_bytes([b[14], b[15]]));
+        let speed = b[23];
+        info.link = usb_speed_name(speed).to_string();
+        info.slow_link = speed < 3;
+    }
+    let mut v2 = [0u8; 16];
+    v2[0..4].copy_from_slice(&port.to_le_bytes());
+    v2[4..8].copy_from_slice(&16u32.to_le_bytes());
+    v2[8..12].copy_from_slice(&7u32.to_le_bytes());
+    let inp = v2;
+    if ioctl(&hf, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, &inp, &mut v2).is_ok() {
+        // The legacy Speed field says "high" for SuperSpeed devices; these flags don't.
+        let flags = u32_at(&v2, 12);
+        info.superspeed_capable = Some(flags & 2 != 0);
+        info.superspeed_plus_capable = Some(flags & 8 != 0);
+        if flags & 4 != 0 {
+            info.link = "USB 3.x SuperSpeed+ (10+ Gbit/s)".into();
+            info.slow_link = false;
+        } else if flags & 1 != 0 {
+            info.link = usb_speed_name(3).to_string();
+            info.slow_link = false;
+        }
+    }
+    Some(info)
+}
+
+fn disk_details(path: &str, devinst: u32) -> io::Result<DiskInfo> {
+    let f = open_dev(path, 0)?;
+    let mut num = [0u8; 12];
+    ioctl(&f, IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut num)?;
+    let n = u32_at(&num, 4);
+    let mut d = DiskInfo { id: n.to_string(), path: format!("\\\\.\\PhysicalDrive{n}"), instance_id: cm_id(devinst), ..Default::default() };
+    let q = [0u8; 12]; // StorageDeviceProperty, PropertyStandardQuery
+    let mut desc = vec![0u8; 1024];
+    if ioctl(&f, IOCTL_STORAGE_QUERY_PROPERTY, &q, &mut desc).is_ok() {
+        d.removable = desc[10] != 0;
+        d.vendor = cstr_at(&desc, u32_at(&desc, 12) as usize);
+        d.product = cstr_at(&desc, u32_at(&desc, 16) as usize);
+        d.revision = cstr_at(&desc, u32_at(&desc, 20) as usize);
+        d.serial = cstr_at(&desc, u32_at(&desc, 24) as usize);
+        d.bus = bus_name(u32_at(&desc, 28)).to_string();
+    }
+    let mut g = [0u8; 256];
+    if ioctl(&f, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, &[], &mut g).is_ok() {
+        d.sector_size = u32_at(&g, 20);
+        d.size = u64_at(&g, 24);
+    }
+    if d.bus == "USB" {
+        d.usb = usb_info(devinst);
+    }
+    d.placeholder_serial = super::suspicious_serial(&d);
+    if d.usb.as_ref().is_some_and(|u| u.serial.is_none()) && d.serial.is_empty() {
+        d.placeholder_serial = Some("the device reports no serial number".into());
+    }
+    Ok(d)
+}
+
+/// All disks with volumes and protection status.
+pub fn list_disks() -> Vec<DiskInfo> {
+    let vols = list_volumes();
+    let prot = protected_disks();
+    let mut disks: Vec<DiskInfo> = interfaces(&GUID_DEVINTERFACE_DISK, None).iter().filter_map(|(p, inst)| disk_details(p, *inst).ok()).collect();
+    disks.sort_by_key(|d| d.id.parse::<u32>().unwrap_or(u32::MAX));
+    for d in &mut disks {
+        d.volumes = vols.iter().filter(|v| v.extents.iter().any(|e| e.0 == d.id)).cloned().collect();
+        d.protected = match &prot {
+            Ok(m) => m.get(&d.id).cloned(),
+            Err(e) => Some(format!("cannot identify the system disk ({e}); refusing all disks")),
+        };
+    }
+    disks
+}
+
+pub fn disk(id: &str) -> io::Result<DiskInfo> {
+    let n = id.trim().trim_start_matches(r"\\.\PhysicalDrive");
+    list_disks().into_iter().find(|d| d.id == n).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("disk {id} not found")))
+}
+
+/// A disk that may be tested, or a refusal message.
+pub fn check_disk(n: &str) -> Result<DiskInfo, String> {
+    let d = disk(n).map_err(|e| e.to_string())?;
+    if let Some(why) = &d.protected {
+        return Err(format!("Disk {n} ({}) cannot be tested: {why}.", d.name()));
+    }
+    Ok(d)
+}
+
+/// The volume and disk behind a target folder, or a refusal message.
+pub fn check_path(p: &Path) -> Result<(VolumeInfo, Option<DiskInfo>), String> {
+    // Resolve junctions and links: the guard must judge where writes really land.
+    let real = std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let v = volume_of_path(&real).map_err(|e| format!("{}: not a local volume ({e})", p.display()))?;
+    let typed = volume_of_path(p).map_err(|e| format!("{}: not a local volume ({e})", p.display()))?;
+    if typed.guid != v.guid {
+        return Err(format!("{} points to another volume ({}); give that path directly.", p.display(), real.display()));
+    }
+    if v.extents.is_empty() {
+        return Err(format!("{}: cannot map the volume to a disk, refusing (network share or unsupported volume?)", p.display()));
+    }
+    let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
+    for e in &v.extents {
+        if let Some(why) = prot.get(&e.0) {
+            return Err(format!("{} is on disk {} which cannot be tested: {why}.", p.display(), e.0));
+        }
+    }
+    let d = if v.extents.len() == 1 { disk(&v.extents[0].0).ok() } else { None };
+    Ok((v, d))
+}
+
+/// Raw access to a whole physical disk. When opened for writing, every volume on
+/// the disk is locked and dismounted for as long as this lives.
+pub struct RawDisk {
+    pub file: File,
+    pub size: u64,
+    pub sector: u32,
+    pub id: String,
+    _locks: Vec<File>,
+    wrote: bool,
+}
+
+impl RawDisk {
+    pub fn open(d: &DiskInfo, write: bool) -> io::Result<RawDisk> {
+        let mut locks = vec![];
+        if write {
+            // Re-check right before writing: disk numbers can move when devices come and go.
+            let now = check_disk(&d.id).map_err(io::Error::other)?;
+            if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial {
+                return Err(io::Error::other(format!("disk {} is no longer the drive that was selected; refusing to write", d.id)));
+            }
+            for v in &d.volumes {
+                locks.push(lock_volume(v)?);
+            }
+        }
+        let path = d.path.clone();
+        let f = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .share_mode(3)
+            .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH)
+            .open(&path)?;
+        let mut len = [0u8; 8];
+        ioctl(&f, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut len)?;
+        if write && ioctl(&f, IOCTL_DISK_IS_WRITABLE, &[], &mut []).is_err() {
+            return Err(io::Error::other("the disk is write-protected"));
+        }
+        Ok(RawDisk { file: f, size: u64::from_le_bytes(len), sector: d.sector_size.max(512), id: d.id.clone(), _locks: locks, wrote: false })
+    }
+}
+
+fn lock_volume(v: &VolumeInfo) -> io::Result<File> {
+    let path = v.guid.trim_end_matches('\\');
+    let f = open_dev(path, GENERIC_READ | GENERIC_WRITE)?;
+    let mut locked = false;
+    for _ in 0..5 {
+        if ioctl(&f, FSCTL_LOCK_VOLUME, &[], &mut []).is_ok() {
+            locked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    // Dismount even if the lock failed (forces open handles closed), then lock.
+    ioctl(&f, FSCTL_DISMOUNT_VOLUME, &[], &mut []).ok();
+    if !locked && ioctl(&f, FSCTL_LOCK_VOLUME, &[], &mut []).is_err() {
+        let name = v.mount_points.first().cloned().unwrap_or_else(|| v.guid.clone());
+        return Err(io::Error::other(format!("volume {name} is in use and cannot be locked; close programs using it")));
+    }
+    Ok(f)
+}
+
+impl Drop for RawDisk {
+    fn drop(&mut self) {
+        if self.wrote {
+            ioctl(&self.file, IOCTL_DISK_UPDATE_PROPERTIES, &[], &mut []).ok();
+        }
+    }
+}
+
+impl Dev for RawDisk {
+    fn len(&self) -> u64 {
+        self.size
+    }
+    fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+        self.wrote = true;
+        let mut done = 0;
+        while done < buf.len() {
+            done += self.file.seek_write(&buf[done..], off + done as u64)?;
+        }
+        Ok(())
+    }
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let n = (buf.len() as u64).min(self.size.saturating_sub(off)) as usize;
+        let mut done = 0;
+        while done < n {
+            let r = self.file.seek_read(&mut buf[done..n], off + done as u64)?;
+            if r == 0 {
+                break;
+            }
+            done += r;
+        }
+        Ok(done)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+    fn align(&self) -> usize {
+        (self.sector as usize).max(ALIGN)
+    }
+}
+
+/// Enable a privilege (e.g. "SeManageVolumePrivilege") on the process token.
+pub fn enable_privilege(name: &str) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, LUID};
+    use windows_sys::Win32::Security::*;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut tok = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut tok) == 0 {
+            return false;
+        }
+        let mut luid = LUID { LowPart: 0, HighPart: 0 };
+        let n = wide(name);
+        let mut ok = LookupPrivilegeValueW(std::ptr::null(), n.as_ptr(), &mut luid) != 0;
+        if ok {
+            let tp = TOKEN_PRIVILEGES { PrivilegeCount: 1, Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }] };
+            ok = AdjustTokenPrivileges(tok, 0, &tp, 0, std::ptr::null_mut(), std::ptr::null_mut()) != 0
+                && windows_sys::Win32::Foundation::GetLastError() == 0;
+        }
+        CloseHandle(tok);
+        ok
+    }
+}
+
+pub fn set_valid_data(f: &File, len: u64) -> io::Result<()> {
+    if unsafe { fs::SetFileValidData(f.as_raw_handle() as _, len as i64) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Bytes per cluster and bytes per sector of the volume at `root` (e.g. `E:\`).
+pub fn cluster_size(root: &str) -> io::Result<(u64, u64)> {
+    let r = wide(root);
+    let (mut spc, mut bps, mut fc, mut tc) = (0u32, 0u32, 0u32, 0u32);
+    if unsafe { fs::GetDiskFreeSpaceW(r.as_ptr(), &mut spc, &mut bps, &mut fc, &mut tc) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((spc as u64 * bps as u64, bps as u64))
+}
+
+pub fn open_volume(v: &VolumeInfo) -> io::Result<File> {
+    open_dev(v.guid.trim_end_matches('\\'), GENERIC_READ)
+}
+
+/// When run from Explorer with no console of its own, detach so the GUI has no console window.
+pub fn hide_own_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut ids = [0u32; 4];
+    let n = unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 4) };
+    if n == 1 {
+        unsafe { FreeConsole() };
+    }
+}
+
+/// Where the GUI saves reports.
+pub fn reports_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join("Documents").join("FlashTester")
+}
+
+/// Nothing to do on Windows: an elevated process writes as the same user.
+pub fn give_to_user(_p: &Path) {}
+
+pub fn open_file(p: &Path) {
+    let _ = std::process::Command::new("explorer").arg(p).spawn();
+}
+
+/// Relaunch this exe elevated with the same arguments (UAC prompt).
+pub fn relaunch_elevated(args: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let (verb, file, params) = (wide("runas"), wide(&exe), wide(args));
+    let r = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), params.as_ptr(), std::ptr::null(), 1) };
+    r as isize > 32
+}
+
+/// Cluster runs of a file: (VCN, LCN, cluster count), skipping unallocated runs.
+pub fn retrieval_pointers(f: &File) -> io::Result<Vec<(u64, u64, u64)>> {
+    let mut out = vec![];
+    let mut vcn = 0u64;
+    loop {
+        let inp = vcn.to_le_bytes();
+        let mut buf = vec![0u8; 16 + 16 * 512];
+        let mut ret = 0u32;
+        let ok = unsafe {
+            windows_sys::Win32::System::IO::DeviceIoControl(
+                f.as_raw_handle() as _,
+                FSCTL_GET_RETRIEVAL_POINTERS,
+                inp.as_ptr() as *const c_void,
+                8,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+                &mut ret,
+                std::ptr::null_mut(),
+            )
+        };
+        let more = ok == 0 && io::Error::last_os_error().raw_os_error() == Some(234);
+        if ok == 0 && !more {
+            return Err(io::Error::last_os_error());
+        }
+        let n = u32_at(&buf, 0) as usize;
+        let mut start = u64_at(&buf, 8);
+        for i in 0..n {
+            let next = u64_at(&buf, 16 + i * 16);
+            let lcn = u64_at(&buf, 24 + i * 16);
+            if lcn as i64 >= 0 {
+                out.push((start, lcn, next - start));
+            }
+            start = next;
+        }
+        vcn = start;
+        if !more || n == 0 {
+            return Ok(out);
+        }
+    }
+}
+
+/// Keeps Windows from sleeping while it lives (a test can run for hours). The
+/// request belongs to the calling thread and is released on drop, including on
+/// cancel, error or panic.
+pub struct KeepAwake;
+
+impl KeepAwake {
+    pub fn new() -> KeepAwake {
+        use windows_sys::Win32::System::Power::*;
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+        KeepAwake
+    }
+}
+
+impl Default for KeepAwake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Power::*;
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+    }
+}
+
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    let w = wide(&path.to_string_lossy());
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    if unsafe { fs::GetDiskFreeSpaceExW(w.as_ptr(), &mut avail, &mut total, &mut free) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(avail)
+}
+
+/// Allocation unit of the volume holding `root`.
+pub fn alloc_unit(root: &Path) -> io::Result<u64> {
+    Ok(cluster_size(&root.to_string_lossy())?.0)
+}
+
+/// Free-space probe: allow allocating files without zero-filling them.
+pub fn free_space_prepare() -> io::Result<()> {
+    if enable_privilege("SeManageVolumePrivilege") { Ok(()) } else { Err(io::Error::other("free-space probe needs administrator rights (SeManageVolumePrivilege)")) }
+}
+
+/// Allocate `len` bytes to `f` without zero-filling and return where they are on
+/// the disk: (file offset, disk offset, length) runs.
+pub fn allocate_and_map(f: &File, len: u64, root: &Path, vol: &VolumeInfo) -> io::Result<Vec<(u64, u64, u64)>> {
+    let (cluster, sector) = cluster_size(&root.to_string_lossy())?;
+    let part_off = vol.extents.first().map(|e| e.1).ok_or_else(|| io::Error::other("volume has no disk extent"))?;
+    let vh = open_volume(vol)?;
+    let mut base = [0u8; 8];
+    let base_bytes = match ioctl(&vh, FSCTL_GET_RETRIEVAL_POINTER_BASE, &[], &mut base) {
+        Ok(_) => u64::from_le_bytes(base) * sector,
+        Err(_) => 0,
+    };
+    f.set_len(len)?;
+    set_valid_data(f, len).map_err(|e| io::Error::other(format!("cannot skip zero-filling ({e}); the free-space probe needs NTFS or exFAT")))?;
+    Ok(retrieval_pointers(f)?.into_iter().map(|(vcn, lcn, n)| (vcn * cluster, part_off + base_bytes + lcn * cluster, n * cluster)).collect())
+}
+
+/// One partition of `size_mib` (None = whole disk) formatted with `fs`, via diskpart.
+pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str) -> Result<String, String> {
+    let size_arg = size_mib.map(|m| format!(" size={m}")).unwrap_or_default();
+    let style = if disk.size > (2u64 << 40) { "gpt" } else { "mbr" };
+    let script = format!("select disk {}\nclean\nconvert {style}\ncreate partition primary{size_arg}\nformat fs={fs} label=\"{label}\" quick\nassign\n", disk.id);
+    let path = std::env::temp_dir().join(format!("flashtester-fix-{}.txt", std::process::id()));
+    std::fs::write(&path, &script).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new("diskpart").arg("/s").arg(&path).output().map_err(|e| format!("cannot run diskpart: {e}"));
+    let _ = std::fs::remove_file(&path);
+    let out = out?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    // diskpart's text is localized; its exit code is not.
+    if !out.status.success() {
+        return Err(format!("diskpart failed:\n{text}"));
+    }
+    Ok(text)
+}
+
+/// Identity of the file system an open file lives on (volume serial number).
+pub fn fs_id(f: &File) -> io::Result<u64> {
+    let mut info: fs::BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { fs::GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.dwVolumeSerialNumber as u64)
+}
+
+/// Identity of the file system holding `p` (a folder or file).
+pub fn fs_id_path(p: &Path) -> io::Result<u64> {
+    // FILE_FLAG_BACKUP_SEMANTICS opens folders too.
+    let f = OpenOptions::new().access_mode(0).share_mode(7).custom_flags(0x0200_0000).open(p)?;
+    fs_id(&f)
+}

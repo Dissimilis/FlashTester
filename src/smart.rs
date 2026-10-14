@@ -15,7 +15,7 @@ use crate::platform::{self, Ata, DiskInfo, Dir};
 use crate::report::{Report, size};
 use serde::{Deserialize, Serialize};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -231,11 +231,24 @@ pub fn possible(d: &DiskInfo) -> bool {
     !NO_SMART.contains(&d.bus.as_str())
 }
 
+/// One SMART read at a time: the JMicron bridge's command, data and completion
+/// must not interleave with another reader's (GUI view and job watcher).
+static ONE: Mutex<()> = Mutex::new(());
+
 /// Read the drive's SMART data. Needs administrator / root rights.
 pub fn read(d: &DiskInfo) -> Result<Smart, String> {
     if !possible(d) {
         return Err(format!("{} disks don't report SMART data.", d.bus));
     }
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    // The disk number may name another device by now (replug): bridge commands
+    // must only go to the bridge they were chosen for.
+    let ids = |x: &DiskInfo| (x.instance_id.clone(), x.serial.clone(), x.usb.as_ref().map(|u| (u.vid.to_uppercase(), u.pid.to_uppercase())));
+    let now = platform::disk(&d.id).map_err(|e| e.to_string())?;
+    if ids(&now) != ids(d) {
+        return Err("The disk was replaced by another device.".into());
+    }
+    let d = &now;
     let sat = |via: &str| ata(|a| platform::scsi(d, &sat_cdb(a), Dir::In(512)), via);
     let usb = |e: String| format!("Most USB flash drives and card readers have no SMART, and many USB adapters don't pass it through. {e}");
     match d.bus.as_str() {
@@ -364,7 +377,7 @@ fn parse_nvme(id: &[u8], log: &[u8], via: &str) -> Result<Smart, String> {
         row("0".into(), "Critical warning", format!("{cw:#04x}")),
         row("1".into(), "Composite temperature", c(temp)),
         row("3".into(), "Available spare (vendor's estimate)", format!("{} %", log[3])),
-        row("4".into(), "Available spare threshold", format!("{} %", log[4])),
+        row("4".into(), "Available spare threshold (vendor's)", format!("{} %", log[4])),
         row("5".into(), "Percentage used (vendor's estimate)", format!("{} %", log[5])),
         row("32".into(), "Data units read (512,000 bytes)", group(le128(log, 32))),
         row("48".into(), "Data units written (512,000 bytes)", group(le128(log, 48))),
@@ -502,8 +515,18 @@ fn attr_name(id: u8) -> &'static str {
     }
 }
 
+/// SSDs whose attributes 198 and 199 count host reads and writes, not errors
+/// (smartmontools' drive database: Indilinx Barefoot 1 and 3, OCZ Intrepid 3000).
+fn traffic_198_199(model: &str) -> bool {
+    let m = model.replacen("OCZ ", "OCZ-", 1).replacen("Patriot ", "Patriot-", 1);
+    let starts = ["OCZ-VECTOR", "OCZ-INTREPID 3", "Corsair CSSD-V", "Corsair CMFSSD-", "CRUCIAL_CT", "G.SKILL FALCON ", "Patriot-Torqx", "RENICE Z2", "STT_FT", "TS18M", "TS25M", "FM-25S2I-", "TS60GSSD25D-M", "TS120GSSD25D-M"];
+    let gen1 = ["OCZ-AGILITY", "OCZ-ONYX", "OCZ-VERTEX", "OCZ-VERTEX 1199", "OCZ-VERTEX-TURBO", "OCZ-VERTEX v1.10"];
+    (starts.iter().any(|p| m.starts_with(p)) && (!m.starts_with("CRUCIAL_CT") || m.ends_with("M225"))) || gen1.contains(&m.as_str())
+}
+
 fn parse_ata(id: &[u8], data: &[u8], th: Option<&[u8]>, via: &str) -> Smart {
     let mut s = Smart { via: via.into(), model: ata_str(id, 27, 20), serial: ata_str(id, 10, 10), firmware: ata_str(id, 23, 4), ..Default::default() };
+    let traffic = traffic_198_199(&s.model);
     let mut attrs = vec![];
     for i in 0..30 {
         let o = 2 + i * 12;
@@ -522,9 +545,9 @@ fn parse_ata(id: &[u8], data: &[u8], th: Option<&[u8]>, via: &str) -> Smart {
     let key = [
         (Counter::Pending, get(197)),
         (Counter::Uncorrectable, get(187)),
-        (Counter::OfflineUncorrectable, get(198)),
+        (Counter::OfflineUncorrectable, get(198).filter(|_| !traffic)),
         (Counter::Reallocated, get(5)),
-        (Counter::LinkErrors, get(199)),
+        (Counter::LinkErrors, get(199).filter(|_| !traffic)),
         (Counter::Temperature, temp(194).or_else(|| temp(190))),
         (Counter::PowerOnHours, get(9)),
         (Counter::PowerCycles, get(12)),
@@ -532,13 +555,14 @@ fn parse_ata(id: &[u8], data: &[u8], th: Option<&[u8]>, via: &str) -> Smart {
     ];
     s.key = key.into_iter().filter_map(|(what, v)| v.map(|value| Key { what, value })).collect();
     for (a, flags, value, worst, raw, thresh) in attrs {
-        let name = attr_name(a);
+        let name = if traffic && (a == 198 || a == 199) { "Vendor specific" } else { attr_name(a) };
         if let Some(t) = thresh
             && t > 0
             && t < 0xFE
             && value <= t
         {
-            s.alarms.push(format!("{name} ({a}) is at or below the drive's failure threshold ({value}, threshold {t})"));
+            // No current value in the text: the before/after check compares alarms as text.
+            s.alarms.push(format!("{name} ({a}) is at or below the drive's failure threshold of {t}"));
         }
         s.raw.push(Raw {
             id: a.to_string(),
@@ -566,6 +590,7 @@ pub fn changes(before: &Smart, after: &Smart) -> Vec<Change> {
 pub struct Watch {
     disk: DiskInfo,
     before: Smart,
+    ctx: Ctx,
     stop: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<Vec<Temp>>,
 }
@@ -588,7 +613,7 @@ impl Watch {
             }
             'poll: loop {
                 for _ in 0..POLL * 4 {
-                    if s.load(Ordering::SeqCst) {
+                    if s.load(Ordering::SeqCst) || c.cancelled() {
                         break 'poll;
                     }
                     std::thread::sleep(Duration::from_millis(250));
@@ -603,15 +628,16 @@ impl Watch {
             }
             temps
         });
-        Some(Watch { disk: d.clone(), before, stop, thread })
+        Some(Watch { disk: d.clone(), before, ctx: ctx.clone(), stop, thread })
     }
 
     /// Read the counters again and put what changed into the report.
     pub fn finish(self, rep: &mut Report) {
         self.stop.store(true, Ordering::SeqCst);
         let temps = self.thread.join().unwrap_or_default();
+        // A cancelled job ends now, not after another round of drive commands.
         // After a replug the disk number may name another drive: compare identity.
-        let after = read(&self.disk).ok().filter(|a| a.serial == self.before.serial && a.model == self.before.model);
+        let after = (!self.ctx.cancelled()).then(|| read(&self.disk).ok()).flatten().filter(|a| a.serial == self.before.serial && a.model == self.before.model);
         judge(&self.before, after.as_ref(), temps, rep);
     }
 }
@@ -709,6 +735,14 @@ mod tests {
         assert_eq!(s.raw[2].raw, "0x003700140029");
         assert_eq!(s.alarms.len(), 1, "{:?}", s.alarms);
         assert!(s.alarms[0].contains("(177)"));
+        // OCZ Vector counts host reads and writes in 198/199: no cable errors from it.
+        let mut vec = id.clone();
+        put_ata_str(&mut vec, 27, &format!("{:<40}", "OCZ-VECTOR150"));
+        let v = parse_ata(&vec, &data, Some(&th), "ATA");
+        assert_eq!(v.get(Counter::LinkErrors), None);
+        assert_eq!(v.raw[4].name, "Vendor specific");
+        assert!(traffic_198_199("OCZ VERTEX") && traffic_198_199("CRUCIAL_CT64M225") && traffic_198_199("OCZ INTREPID 3800"));
+        assert!(!traffic_198_199("OCZ-VERTEX3") && !traffic_198_199("CRUCIAL_CT500MX500SSD1") && !traffic_198_199("Samsung SSD 870 EVO 1TB"));
     }
 
     #[test]
@@ -804,6 +838,7 @@ mod tests {
         let mut more = data.clone();
         attr(&mut more, 3, 197, 0x32, 100, 8); // pending 0 -> 8
         attr(&mut more, 4, 199, 0x3E, 100, 9); // CRC 7 -> 9
+        attr(&mut more, 5, 177, 0x13, 4, 1500); // the alarm it already had: not new
         let b = parse_ata(&id, &more, Some(&th), "ATA");
         let hot = vec![Temp { secs: 0.0, pos: 0, c: 41 }];
         let mut rep = Report::default();

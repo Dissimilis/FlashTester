@@ -381,14 +381,15 @@ fn smart(t: &TargetArg, json: bool) -> i32 {
         println!("  {:<42} {}", k.what.label(), ascii(&k.what.show(k.value)));
     }
     println!("\nAll counters:");
+    let w = s.raw.iter().map(|r| r.name.chars().count()).max().unwrap_or(0).max(9);
     if s.raw.iter().any(|r| !r.worst.is_empty()) {
-        println!("  {:>3}  {:<44} {:>5} {:>5} {:>6}  Raw", "ID", "Attribute", "Value", "Worst", "Thresh");
+        println!("  {:>3}  {:<w$} {:>5} {:>5} {:>6}  Raw", "ID", "Attribute", "Value", "Worst", "Thresh");
         for r in &s.raw {
-            println!("  {:>3}  {:<44} {:>5} {:>5} {:>6}  {}", r.id, r.name, r.value, r.worst, r.thresh, r.raw);
+            println!("  {:>3}  {:<w$} {:>5} {:>5} {:>6}  {}", r.id, r.name, r.value, r.worst, r.thresh, r.raw);
         }
     } else {
         for r in &s.raw {
-            println!("  {:<44} {}", r.name, ascii(&r.value));
+            println!("  {:<w$} {}", r.name, ascii(&r.value));
         }
     }
     code

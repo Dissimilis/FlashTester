@@ -758,7 +758,7 @@ pub fn fs_id_path(p: &Path) -> io::Result<u64> {
 }
 
 // SMART pass-through (read-only commands only; see smart.rs). The buffered IOCTLs
-// carry header and data in one buffer, so there are no alignment rules. Offsets
+// carry header and data in one buffer; the data starts 16-byte aligned. Offsets
 // are the 64-bit structure layouts.
 
 const IOCTL_SCSI_PASS_THROUGH: u32 = 0x0004_D004;
@@ -768,7 +768,7 @@ const _: () = assert!(std::mem::size_of::<usize>() == 8);
 /// A SCSI command with data in or out: SCSI_PASS_THROUGH (56 bytes), 32 bytes of sense, data.
 pub fn scsi(d: &DiskInfo, cdb: &[u8], dir: super::Dir) -> io::Result<Vec<u8>> {
     const HDR: usize = 56;
-    const DATA: usize = HDR + 32;
+    const DATA: usize = 96;
     let (n, data_in) = match dir {
         super::Dir::In(n) => (n, 1u8),
         super::Dir::Out(b) => (b.len(), 0u8),
@@ -788,11 +788,15 @@ pub fn scsi(d: &DiskInfo, cdb: &[u8], dir: super::Dir) -> io::Result<Vec<u8>> {
     }
     let f = open_dev(&d.path, GENERIC_READ | GENERIC_WRITE)?;
     let inp = b.clone();
-    ioctl(&f, IOCTL_SCSI_PASS_THROUGH, &inp, &mut b)?;
+    let back = ioctl(&f, IOCTL_SCSI_PASS_THROUGH, &inp, &mut b)?;
+    if back < HDR {
+        return Err(io::Error::other("short pass-through reply"));
+    }
     if b[2] != 0 {
-        let s = &b[HDR..DATA];
+        let s = &b[HDR..HDR + 32];
         return Err(io::Error::other(format!("SCSI status {:#04x}, sense {:x}/{:02x}/{:02x}", b[2], s[2] & 0xF, s[12], s[13])));
     }
+    // DataTransferLength comes back as what moved; smart.rs rejects short data.
     let got = (u32_at(&b, 12) as usize).min(n);
     Ok(if data_in == 1 { b[DATA..DATA + got].to_vec() } else { vec![] })
 }
@@ -810,10 +814,13 @@ pub fn ata(d: &DiskInfo, a: super::Ata) -> io::Result<Vec<u8>> {
     b[40..47].copy_from_slice(&[a.features, 1, 0, a.lba_mid, a.lba_high, 0, a.command]);
     let f = open_dev(&d.path, GENERIC_READ | GENERIC_WRITE)?;
     let inp = b.clone();
-    ioctl(&f, IOCTL_ATA_PASS_THROUGH, &inp, &mut b)?;
+    let back = ioctl(&f, IOCTL_ATA_PASS_THROUGH, &inp, &mut b)?;
     // The status register comes back in place of the command byte; bit 0 is ERR.
-    if b[46] & 1 != 0 {
+    if back < HDR || b[46] & 1 != 0 {
         return Err(io::Error::other(format!("ATA error {:#04x}", b[40])));
+    }
+    if back < HDR + 512 || u32_at(&b, 8) < 512 {
+        return Err(io::Error::other("the drive returned less than a sector"));
     }
     Ok(b[HDR..].to_vec())
 }
@@ -841,10 +848,12 @@ pub fn nvme(d: &DiskInfo, op: u8, _nsid: u32, cdw10: u32, len: usize) -> io::Res
         let inp = b.clone();
         match ioctl(&f, IOCTL_STORAGE_QUERY_PROPERTY, &inp, &mut b) {
             // Back comes STORAGE_PROTOCOL_DATA_DESCRIPTOR: the same protocol data at 8.
-            Ok(_) => {
+            Ok(back) => {
                 let off = 8 + u32_at(&b, 24) as usize;
-                let n = (u32_at(&b, 28) as usize).min(len).min(b.len().saturating_sub(off));
-                return Ok(b[off..off + n].to_vec());
+                if back < 48 || (u32_at(&b, 28) as usize) < len || off.checked_add(len).is_none_or(|e| e > back.min(b.len())) {
+                    return Err(io::Error::other("short NVMe reply"));
+                }
+                return Ok(b[off..off + len].to_vec());
             }
             Err(e) => last = e,
         }

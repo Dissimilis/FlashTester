@@ -16,6 +16,11 @@ Finds out whether a USB stick, SD card or other disk really stores what it claim
 - **Reports:** a plain verdict, a detailed HTML report, JSON, exit codes, and a one-page evidence sheet for refund claims.
 - **Fix:** repartition a fake drive to the capacity that really works.
 
+[![CI](https://github.com/Dissimilis/FlashTester/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/Dissimilis/FlashTester/actions/workflows/release.yml)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20FreeBSD-lightgrey.svg)](#download-and-run)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-donate-yellow.svg)](https://buymeacoffee.com/dissimilis)
+
 ## The GUI
 
 The drive list on the left offers each volume (file mode: tests free space, keeps your files) and each whole disk (raw mode: tests everything, erases it). Pick one, pick a test, and the panel on the right explains what the test does and what it will touch. Whole-disk tests are shown in red and need a confirmation tick. Tests that need administrator rights say so and offer to restart FlashTester elevated. While a test runs, the block map and speed graph fill in; at the end you get the verdict, the next sensible step and buttons for the reports.

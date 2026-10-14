@@ -105,17 +105,19 @@ fn paint(cells: &mut [Cell], a: u64, b: u64, st: State, err: Option<&str>) {
     }
 }
 
+/// Speed per cell as bytes over time: each point is one equal-sized block (or region),
+/// so that is the harmonic mean. A plain mean would hide stalls behind fast blocks.
 fn speeds(cells: &mut [Cell], pts: impl Iterator<Item = (u64, f64)>, read: bool) {
     let mut acc = vec![(0.0, 0u32); cells.len()];
     let span = cells.last().map(|c| c.end).unwrap_or(1).max(1);
     for (pos, v) in pts {
         let i = ((pos as u128 * cells.len() as u128 / span as u128) as usize).min(cells.len() - 1);
-        acc[i].0 += v;
+        acc[i].0 += 1.0 / v.max(1e-6);
         acc[i].1 += 1;
     }
     for (c, (s, n)) in cells.iter_mut().zip(acc) {
         if n > 0 {
-            let v = Some(s / n as f64);
+            let v = Some(n as f64 / s);
             if read { c.read = v } else { c.write = v }
         }
     }
@@ -236,7 +238,7 @@ pub fn show(ui: &mut egui::Ui, cells: &[Cell], title: &str) {
     ui.spacing_mut().item_spacing.y = 8.0;
     let span = cells.last().map(|c| c.end).unwrap_or(0).saturating_sub(cells.first().map(|c| c.start).unwrap_or(0));
     let (head, _) = ui.allocate_exact_size(vec2(MAP_W, 16.0), Sense::hover());
-    k::paint_text(ui.painter(), head.left_center(), egui::Align2::LEFT_CENTER, title, 12.0, k::TEXT3);
+    k::paint_medium(ui.painter(), head.left_center(), egui::Align2::LEFT_CENTER, title, 12.0, k::TEXT3);
     let scale = format!("{} cells · {} each", cells.len(), size(span / cells.len().max(1) as u64));
     k::paint_text(ui.painter(), head.right_center(), egui::Align2::RIGHT_CENTER, &scale, 11.0, k::TEXT3);
 
@@ -297,12 +299,30 @@ fn tooltip(ui: &mut egui::Ui, c: &Cell) {
     }
 }
 
+/// Speed per slice of the position axis, as bytes over time (the harmonic mean of
+/// equal-sized blocks), so a stall counts for the time it took. One slow block is
+/// smoothed out; a slow region that spans slices still shows. Display only.
+fn smooth(pts: &[[f64; 2]], max_slices: usize) -> Vec<[f64; 2]> {
+    // At least 4 points per slice: cached and flushed blocks alternate on many sticks.
+    let slices = (pts.len() / 4).clamp(1, max_slices);
+    let (lo, hi) = pts.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
+    if hi <= lo {
+        return pts.to_vec();
+    }
+    let mut acc = vec![(0.0, 0.0, 0u32); slices];
+    for p in pts {
+        let i = (((p[0] - lo) / (hi - lo) * slices as f64) as usize).min(slices - 1);
+        acc[i] = (acc[i].0 + p[0], acc[i].1 + 1.0 / p[1].max(1e-6), acc[i].2 + 1);
+    }
+    acc.into_iter().filter(|a| a.2 > 0).map(|(x, inv, n)| [x / n as f64, n as f64 / inv]).collect()
+}
+
 /// Speed by position: write blue, read green.
 pub fn graph(ui: &mut egui::Ui, curves: &[Curve], w: f32) {
     ui.spacing_mut().item_spacing.y = 8.0;
     let (head, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
     let p = ui.painter();
-    k::paint_text(p, head.left_center(), egui::Align2::LEFT_CENTER, "Speed (MB/s) by position", 12.0, k::TEXT3);
+    k::paint_medium(p, head.left_center(), egui::Align2::LEFT_CENTER, "Speed (MB/s) by position", 12.0, k::TEXT3);
     let mut x = head.right();
     for (read, name, color) in [(true, "Read", k::OK), (false, "Write", k::ACCENT)] {
         if curves.iter().any(|c| c.read == read && c.pts.len() > 1) {
@@ -330,7 +350,7 @@ pub fn graph(ui: &mut egui::Ui, curves: &[Curve], w: f32) {
         .show(ui, |pl| {
             for c in curves.iter().filter(|c| c.pts.len() > 1) {
                 let (name, color) = if c.read { ("Read", k::OK) } else { ("Write", k::ACCENT) };
-                pl.line(egui_plot::Line::new(name, c.pts.clone()).color(color).width(1.5));
+                pl.line(egui_plot::Line::new(name, smooth(&c.pts, 60)).color(color).width(1.5));
             }
         });
 }
@@ -338,7 +358,7 @@ pub fn graph(ui: &mut egui::Ui, curves: &[Curve], w: f32) {
 /// Real vs claimed capacity (capacity probe results).
 pub fn capacity(ui: &mut egui::Ui, real: u64, claimed: u64, w: f32) {
     ui.spacing_mut().item_spacing.y = 6.0;
-    ui.label(k::text("Real vs claimed capacity", 12.0, k::TEXT3));
+    ui.label(k::medium("Real vs claimed capacity", 12.0, k::TEXT3));
     let (bar, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
     let frac = if claimed > 0 { (real as f64 / claimed as f64).clamp(0.0, 1.0) as f32 } else { 0.0 };
     let gw = (bar.width() * frac).max(5.0).min(bar.width());
@@ -348,11 +368,11 @@ pub fn capacity(ui: &mut egui::Ui, real: u64, claimed: u64, w: f32) {
     p.rect_stroke(bar, 0.0, Stroke::new(1.0, k::LINE), StrokeKind::Inside);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(k::text(size(real), 22.0, k::OK));
+        ui.label(k::medium(size(real), 22.0, k::OK));
         ui.label(k::text("stores data", 12.0, k::TEXT2));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(k::text("claimed", 12.0, k::TEXT2));
-            ui.label(k::text(size(claimed), 22.0, k::TEXT));
+            ui.label(k::medium(size(claimed), 22.0, k::TEXT));
         });
     });
     let note = if real >= claimed {
@@ -361,4 +381,27 @@ pub fn capacity(ui: &mut egui::Ui, real: u64, claimed: u64, w: f32) {
         format!("{:.1} % of the claimed size is real. Data written beyond {} is lost or lands on earlier data (orange in the map).", frac * 100.0, size(real))
     };
     ui.add(egui::Label::new(k::text(note, 12.0, k::TEXT2)).wrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smooth;
+
+    #[test]
+    fn slice_speed_is_bytes_over_time() {
+        // Three equal blocks, one of them stalled: 3 blocks in 1/100 + 1 + 1/100 time units.
+        let s = smooth(&[[0.0, 100.0], [0.5, 1.0], [1.0, 100.0]], 1);
+        assert_eq!(s.len(), 1);
+        assert!((s[0][1] - 3.0 / 1.02).abs() < 1e-9, "{}", s[0][1]);
+    }
+
+    #[test]
+    fn alternating_blocks_become_one_steady_line() {
+        // 60 blocks alternating 110 and 15 MB/s, as a stick writing through a small cache does.
+        let pts: Vec<[f64; 2]> = (0..60).map(|i| [i as f64, if i % 2 == 0 { 110.0 } else { 15.0 }]).collect();
+        let s = smooth(&pts, 60);
+        assert_eq!(s.len(), 15);
+        let truth = 2.0 / (1.0 / 110.0 + 1.0 / 15.0);
+        assert!(s.iter().all(|p| (p[1] - truth).abs() < 1e-9), "{s:?}");
+    }
 }

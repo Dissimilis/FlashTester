@@ -2,7 +2,7 @@
 
 Website: [flashtester.eu](https://flashtester.eu/).
 
-![FlashTester after a 4 GB full test of a Verbatim Store 'n' Go USB stick: verdict OK, block map and speed graph](website/screenshot-result.png)
+![FlashTester after a 1 GB full test of a generic 64 GB USB drive: verdict OK, block map and speed graph](website/screenshot-result.png)
 
 Finds out whether a USB stick, SD card or other disk really stores what it claims. FlashTester does what [h2testw](https://www.heise.de/download/product/h2testw-50539) does and adds the things h2testw can't:
 
@@ -159,4 +159,4 @@ powershell -ExecutionPolicy Bypass -File test\vhd-test.ps1   # elevated; uses a 
 
 ## Licence
 
-MIT
+MIT. The GUI embeds the Ubuntu font (Regular and Medium; Copyright 2011 Canonical Ltd.), which is under the [Ubuntu Font Licence 1.0](assets/fonts/UFL.txt).

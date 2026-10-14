@@ -422,7 +422,7 @@ impl Gui {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             k::logo(ui);
-            ui.label(k::text("FlashTester", 16.0, k::TEXT));
+            ui.label(k::medium("FlashTester", 16.0, k::TEXT));
             ui.label(k::text(env!("CARGO_PKG_VERSION"), 12.0, k::TEXT3));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -446,7 +446,7 @@ impl Gui {
         let locked = self.running.is_some();
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 44.0), Layout::left_to_right(Align::Center), |ui| {
             ui.add_space(16.0);
-            ui.label(k::text("Drives", 16.0, k::TEXT));
+            ui.label(k::medium("Drives", 16.0, k::TEXT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(12.0);
                 if k::icon_button(ui, Icon::Refresh, "Refresh", !locked, if locked { 0.35 } else { 1.0 }).on_hover_text("Refresh").clicked() {
@@ -473,7 +473,7 @@ impl Gui {
                     }
                     ui.horizontal(|ui| {
                         ui.add_space(4.0);
-                        ui.label(k::text(label, 12.0, k::TEXT3));
+                        ui.label(k::medium(label, 12.0, k::TEXT3));
                     });
                     for d in group {
                         self.disk_card(ui, d, locked);
@@ -505,10 +505,10 @@ impl Gui {
                     let p = ui.painter();
                     let ix = h.left() + 4.0;
                     k::paint_icon(p, Rect::from_center_size(pos2(ix + 10.0, h.center().y), Vec2::splat(16.0)), disk_icon(d), k::TEXT2);
-                    let sz = k::paint_text(p, pos2(h.right() - 4.0, h.center().y), Align2::RIGHT_CENTER, &size(d.size), 16.0, k::TEXT);
+                    let sz = k::paint_medium(p, pos2(h.right() - 4.0, h.center().y), Align2::RIGHT_CENTER, &size(d.size), 16.0, k::TEXT);
                     let tx = ix + 28.0;
                     let max_w = sz.left() - 8.0 - tx;
-                    p.galley(pos2(tx, h.center().y - 17.0), k::galley(ui, &d.name(), FontId::proportional(14.0), max_w), k::TEXT);
+                    p.galley(pos2(tx, h.center().y - 17.0), k::galley(ui, &d.name(), k::medium_font(14.0), max_w), k::TEXT);
                     p.galley(pos2(tx, h.center().y + 1.0), k::galley(ui, &format!("Disk {} · {}", d.id, bus_text(d)), FontId::proportional(12.0), max_w), k::TEXT3);
                     if let Some(why) = &d.protected {
                         ui.horizontal(|ui| {
@@ -597,7 +597,7 @@ impl Gui {
             ui.vertical(|ui| {
                 ui.set_max_width(640.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
-                ui.label(k::text("Select a drive to test", 40.0, k::TEXT));
+                ui.label(k::light("Select a drive to test", 40.0, k::TEXT));
                 ui.add(Label::new(k::text("Pick a volume or a whole disk in the list on the left. What you pick decides what the test may touch.", 15.0, k::TEXT2)).wrap());
                 ui.add_space(20.0);
                 ui.horizontal_top(|ui| {
@@ -667,7 +667,7 @@ impl Gui {
                 ui.spacing_mut().item_spacing.y = 10.0;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    ui.label(k::text(title, 24.0, k::TEXT));
+                    ui.label(k::medium(title, 24.0, k::TEXT));
                     ui.add(Label::new(k::text(sub, 13.0, k::TEXT2)).truncate());
                 });
                 self.identity(ui);
@@ -694,7 +694,7 @@ impl Gui {
                 ui.allocate_ui_with_layout(vec2(unit * f, 40.0), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(unit * f);
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(k::text(label, 11.0, k::TEXT3));
+                    ui.label(k::medium(label, 11.0, k::TEXT3));
                     ui.add(Label::new(k::text(value, 13.0, if warn { k::WARN_TEXT } else { k::TEXT })).truncate());
                     if !sub.is_empty() {
                         ui.label(k::mono(sub, 11.0, k::TEXT3));
@@ -734,7 +734,7 @@ impl Gui {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
-                    ui.label(k::text(group, 12.0, k::TEXT3));
+                    ui.label(k::medium(group, 12.0, k::TEXT3));
                 });
                 ui.add_space(2.0);
             }
@@ -757,14 +757,14 @@ impl Gui {
         k::radio(p, pos2(rect.left() + 17.0, cy), ring, dot);
         let mut x = rect.right() - 10.0;
         if kd.erases(raw) {
-            x = k::paint_text(p, pos2(x, cy), Align2::RIGHT_CENTER, "Erases", 11.0, k::DANGER).left() - 8.0;
+            x = k::paint_medium(p, pos2(x, cy), Align2::RIGHT_CENTER, "Erases", 11.0, k::DANGER).left() - 8.0;
         }
         if !raw && !self.admin && kd.needs_admin(false) {
             k::paint_icon(p, Rect::from_center_size(pos2(x - 6.5, cy), Vec2::splat(13.0)), Icon::Shield, k::WARN);
             x -= 21.0;
         }
         if kd == Kind::for_target(raw)[0] {
-            x = k::paint_text(p, pos2(x, cy), Align2::RIGHT_CENTER, "Suggested", 11.0, k::LINK).left() - 8.0;
+            x = k::paint_medium(p, pos2(x, cy), Align2::RIGHT_CENTER, "Suggested", 11.0, k::LINK).left() - 8.0;
         }
         let left = rect.left() + 34.0;
         let g = k::galley(ui, kd.name(), FontId::proportional(14.0), x - left);
@@ -776,9 +776,9 @@ impl Gui {
     fn test_detail(&mut self, ui: &mut egui::Ui, raw: bool) {
         let inner = ui.max_rect();
         ui.spacing_mut().item_spacing.y = 0.0;
-        ui.label(k::text(self.kind.group(), 12.0, k::TEXT3));
+        ui.label(k::medium(self.kind.group(), 12.0, k::TEXT3));
         ui.add_space(2.0);
-        ui.label(k::text(self.kind.name(), 30.0, k::TEXT));
+        ui.label(k::medium(self.kind.name(), 30.0, k::TEXT));
         ui.add_space(6.0);
         ui.scope(|ui| {
             ui.set_max_width(ui.available_width().min(440.0));
@@ -809,7 +809,7 @@ impl Gui {
                     ui.allocate_ui_with_layout(vec2(text_w, 10.0), Layout::top_down(Align::Min), |ui| {
                         ui.set_width(text_w);
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(k::text(format!("This test needs {ADMIN} rights"), 14.0, k::WARN_TEXT));
+                        ui.label(k::medium(format!("This test needs {ADMIN} rights"), 14.0, k::WARN_TEXT));
                         ui.add(Label::new(k::text(format!("FlashTester restarts with {ADMIN} rights; pick the drive and test again there."), 12.0, k::WARN_SUB)).wrap());
                     });
                     relaunch = k::button(ui, Look::Amber, None, &label, 32.0, 13.0, true).clicked();
@@ -819,7 +819,7 @@ impl Gui {
         if destructive {
             Frame::new().fill(k::DANGER_TINT).stroke(Stroke::new(1.0, k::DANGER_STROKE)).corner_radius(4).inner_margin(14).show(&mut ui, |ui| {
                 ui.set_width(ui.available_width());
-                let title = k::text(format!("I understand that ALL data on {} will be destroyed", self.disk_desc()), 14.0, k::DANGER_LIGHT);
+                let title = k::medium(format!("I understand that ALL data on {} will be destroyed", self.disk_desc()), 14.0, k::DANGER_LIGHT);
                 let sub = k::text("Partitions, files and the file system. This cannot be undone.", 12.0, k::DANGER_SUB);
                 k::checkbox(ui, &mut self.confirm, 18.0, k::DANGER, k::DANGER, title, Some(sub));
             });
@@ -1021,8 +1021,8 @@ impl Gui {
                     });
                     ui.allocate_ui_with_layout(vec2(ui.available_width(), 10.0), Layout::top_down(Align::Min), |ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.label(k::text("Action needed: the test is waiting for you", 13.0, k::WARN_INK));
-                        ui.add(Label::new(k::text(head, 34.0, k::WARN_INK)).wrap());
+                        ui.label(k::medium("Action needed: the test is waiting for you", 13.0, k::WARN_INK));
+                        ui.add(Label::new(k::medium(head, 34.0, k::WARN_INK)).wrap());
                         if !sub.is_empty() {
                             ui.add(Label::new(k::text(sub, 16.0, k::WARN_INK)).wrap());
                         }
@@ -1072,7 +1072,7 @@ impl Gui {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                 ui.painter().rect(r, 0.0, dot, Stroke::new(1.0, color), StrokeKind::Inside);
                 let name = ph.split(" (").next().unwrap_or(ph);
-                ui.label(k::text(name, 14.0, color));
+                ui.label(k::medium(name, 14.0, color));
                 if !current {
                     k::icon(ui, Icon::Check, 12.0, k::TEXT3);
                     ui.add_space(4.0);
@@ -1081,7 +1081,7 @@ impl Gui {
         });
         lc.add_space(8.0);
         let mut job = LayoutJob::default();
-        let fmt = |size: f32, color: Color32| TextFormat { font_id: FontId::proportional(size), color, valign: Align::BOTTOM, ..Default::default() };
+        let fmt = |size: f32, color: Color32| TextFormat { font_id: k::light_font(size), color, valign: Align::BOTTOM, ..Default::default() };
         if s.total > 0 {
             job.append(&format!("{:.0}", (frac * 100.0).floor()), 0.0, fmt(76.0, k::TEXT));
             job.append("%", 0.0, fmt(40.0, k::TEXT2));
@@ -1116,13 +1116,13 @@ impl Gui {
             if s.done > 0 && el > 2.0 && s.total > 0 && !waiting { crate::report::duration(el * s.total.saturating_sub(s.done) as f64 / s.done as f64) } else { "–".into() };
         // Values at 24 pt, or 20 pt when a wide percentage leaves too little room.
         let stats = [(done_label, done), (speed_label, speed), ("Time left", eta)];
-        let width = |pt: f32| stats.iter().map(|(_, v)| ui.painter().layout_no_wrap(v.clone(), FontId::proportional(pt), k::TEXT).size().x + 24.0).sum::<f32>();
+        let width = |pt: f32| stats.iter().map(|(_, v)| ui.painter().layout_no_wrap(v.clone(), k::medium_font(pt), k::TEXT).size().x + 24.0).sum::<f32>();
         let pt = if width(24.0) <= mid.width() { 24.0 } else { 20.0 };
         let mut x = mid.left();
         let p = ui.painter_at(mid);
         for (label, value) in stats {
-            k::paint_text(&p, pos2(x, mid.bottom() - 30.0), Align2::LEFT_BOTTOM, label, 11.0, k::TEXT3);
-            let r = k::paint_text(&p, pos2(x, mid.bottom()), Align2::LEFT_BOTTOM, &value, pt, k::TEXT);
+            k::paint_medium(&p, pos2(x, mid.bottom() - 30.0), Align2::LEFT_BOTTOM, label, 11.0, k::TEXT3);
+            let r = k::paint_medium(&p, pos2(x, mid.bottom()), Align2::LEFT_BOTTOM, &value, pt, k::TEXT);
             x = r.right().max(x + 90.0) + 24.0;
         }
 
@@ -1170,13 +1170,15 @@ impl Gui {
         if at_bottom && gap > 0.0 {
             ui.add_space(gap);
         }
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+        // A fixed id: an automatic one can match a widget of the previous view and inherit its state.
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+        let resp = ui.interact(rect, egui::Id::new("log-bar"), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, "Log"));
         let p = ui.painter();
         let cy = rect.center().y;
         p.rect(rect, 4.0, k::BAR, Stroke::new(1.0, if resp.hovered() { k::LINE } else { k::LINE_SUBTLE }), StrokeKind::Inside);
         k::paint_icon(p, Rect::from_center_size(pos2(rect.left() + 16.0, cy), Vec2::splat(12.0)), if self.log_open { Icon::ChevronDown } else { Icon::ChevronRight }, k::TEXT2);
-        let lr = k::paint_text(p, pos2(rect.left() + 32.0, cy), Align2::LEFT_CENTER, "Log", 12.0, k::TEXT2);
+        let lr = k::paint_medium(p, pos2(rect.left() + 32.0, cy), Align2::LEFT_CENTER, "Log", 12.0, k::TEXT2);
         let cr = k::paint_text(p, pos2(rect.right() - 10.0, cy), Align2::RIGHT_CENTER, &format!("{} lines", self.log.len()), 11.0, k::TEXT3);
         if let Some(last) = self.log.last() {
             let g = k::galley(ui, last, FontId::monospace(12.0), cr.left() - 10.0 - (lr.right() + 10.0));
@@ -1229,7 +1231,7 @@ impl Gui {
                             ui.label(k::text("Full text summary", 12.0, k::TEXT2));
                         })
                         .response;
-                    let r = ui.interact(r.rect, r.id.with("summary"), Sense::click());
+                    let r = ui.interact(r.rect, egui::Id::new("summary-toggle"), Sense::click());
                     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, "Full text summary"));
                     k::pointer_on_hover(&r);
                     if r.clicked() {
@@ -1312,7 +1314,7 @@ impl Gui {
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 8.0;
-                    ui.add(Label::new(k::text(&rep.verdict.headline, 20.0, k::TEXT)).wrap());
+                    ui.add(Label::new(k::medium(&rep.verdict.headline, 20.0, k::TEXT)).wrap());
                     ui.scope(|ui| {
                         ui.spacing_mut().item_spacing.y = 3.0;
                         for d in &rep.verdict.details {
@@ -1325,7 +1327,7 @@ impl Gui {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
-                        ui.label(k::text("Next step", 12.0, k::TEXT2));
+                        ui.label(k::medium("Next step", 12.0, k::TEXT2));
                         let mut b = |look, label: &str, a: Act| {
                             if k::button(ui, look, None, label, 32.0, 13.0, true).clicked() {
                                 act = Some(a);
@@ -1362,8 +1364,8 @@ impl Gui {
         p.rect_filled(col, CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, solid);
         let word = st.label();
         let size = if word.len() > 6 { 22.0 } else { 34.0 };
-        let wr = k::paint_text(p, col.center() + vec2(0.0, 8.0), Align2::CENTER_CENTER, word, size, ink);
-        k::paint_text(p, pos2(col.center().x, wr.top() - 2.0), Align2::CENTER_BOTTOM, "Verdict", 11.0, ink.gamma_multiply(0.8));
+        let wr = k::paint_medium(p, col.center() + vec2(0.0, 8.0), Align2::CENTER_CENTER, word, size, ink);
+        k::paint_medium(p, pos2(col.center().x, wr.top() - 2.0), Align2::CENTER_BOTTOM, "Verdict", 11.0, ink.gamma_multiply(0.8));
         act
     }
 }
@@ -1381,12 +1383,12 @@ fn mode_band(ui: &egui::Ui, rect: Rect, raw: bool, radius: CornerRadius, slim: O
     match slim {
         None => {
             p.rect_filled(rect, radius, fill);
-            let r = k::paint_text(p, pos2(rect.left() + 13.0, cy), Align2::LEFT_CENTER, label, 14.0, fg);
+            let r = k::paint_medium(p, pos2(rect.left() + 13.0, cy), Align2::LEFT_CENTER, label, 14.0, fg);
             p.galley(pos2(r.right() + 10.0, cy - 8.0), k::galley(ui, line, FontId::proportional(13.0), rect.right() - r.right() - 24.0), fg);
         }
         Some(((title, sub), test)) => {
             p.rect(rect, radius, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-            let r = k::paint_text(p, pos2(rect.left() + 12.0, cy), Align2::LEFT_CENTER, label, 14.0, fg);
+            let r = k::paint_medium(p, pos2(rect.left() + 12.0, cy), Align2::LEFT_CENTER, label, 14.0, fg);
             let t = k::paint_text(p, pos2(r.right() + 12.0, cy), Align2::LEFT_CENTER, &title, 13.0, k::TEXT);
             let n = k::paint_text(p, pos2(rect.right() - 12.0, cy), Align2::RIGHT_CENTER, &test, 12.0, k::TEXT2);
             let g = k::galley(ui, &sub, FontId::proportional(13.0), n.left() - 12.0 - (t.right() + 12.0));
@@ -1400,8 +1402,8 @@ fn info_card(ui: &mut egui::Ui, fill: Color32, stroke: Color32, head: &str, head
         ui.vertical(|ui| {
             ui.set_width(268.0);
             ui.spacing_mut().item_spacing.y = 5.0;
-            ui.label(k::text(head, 13.0, head_color));
-            ui.add(Label::new(k::text(title, 16.0, k::TEXT)).wrap());
+            ui.label(k::medium(head, 13.0, head_color));
+            ui.add(Label::new(k::medium(title, 16.0, k::TEXT)).wrap());
             ui.add(Label::new(k::text(sub, 13.0, k::TEXT2)).wrap());
         });
     });
@@ -1514,8 +1516,12 @@ impl Gui {
 
     fn show(&mut self, ui: &mut egui::Ui) {
         if !self.styled {
+            // New fonts apply from the next pass: draw nothing until then.
             k::style(ui.ctx());
             self.styled = true;
+            ui.ctx().request_discard("fonts");
+            ui.ctx().request_repaint();
+            return;
         }
         #[cfg(target_os = "linux")]
         self.poll_relaunch(ui.ctx());

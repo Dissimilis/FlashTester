@@ -58,10 +58,38 @@ pub const EMPTY_RAW: Color32 = hex(0x2e2426);
 pub const EMPTY_RAW_STROKE: Color32 = hex(0x6a3a3a);
 pub const ORANGE: Color32 = hex(0xe08a3c);
 
-/// The global style: dark surfaces, 3 px inputs, the tooltip frame and shadow.
+/// The global style: fonts, dark surfaces, 3 px inputs, the tooltip frame and shadow.
 pub fn style(ctx: &egui::Context) {
+    ctx.set_fonts(fonts());
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.all_styles_mut(apply);
+}
+
+const MEDIUM: &str = "medium";
+const LIGHT: &str = "light";
+
+/// Ubuntu Regular for text and Medium for titles and labels (the design's 400 and 500
+/// weights). egui's own Ubuntu Light is thin and uneven at small sizes; it stays for
+/// the two largest headings and as the glyph fallback behind both.
+fn fonts() -> egui::FontDefinitions {
+    use egui::{FontData, FontFamily};
+    let mut f = egui::FontDefinitions::default();
+    f.font_data.insert("Ubuntu-Regular".into(), Arc::new(FontData::from_static(include_bytes!("../assets/fonts/Ubuntu-Regular.ttf"))));
+    f.font_data.insert("Ubuntu-Medium".into(), Arc::new(FontData::from_static(include_bytes!("../assets/fonts/Ubuntu-Medium.ttf"))));
+    let base = f.families[&FontFamily::Proportional].clone();
+    let with = |first: &str| std::iter::once(first.to_string()).chain(base.iter().cloned()).collect::<Vec<_>>();
+    f.families.insert(FontFamily::Proportional, with("Ubuntu-Regular"));
+    f.families.insert(FontFamily::Name(MEDIUM.into()), with("Ubuntu-Medium"));
+    f.families.insert(FontFamily::Name(LIGHT.into()), base);
+    f
+}
+
+pub fn medium_font(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name(MEDIUM.into()))
+}
+
+pub fn light_font(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name(LIGHT.into()))
 }
 
 fn apply(s: &mut egui::Style) {
@@ -106,6 +134,14 @@ fn apply(s: &mut egui::Style) {
 
 pub fn text(s: impl Into<String>, size: f32, color: Color32) -> RichText {
     RichText::new(s).size(size).color(color)
+}
+
+pub fn medium(s: impl Into<String>, size: f32, color: Color32) -> RichText {
+    RichText::new(s).font(medium_font(size)).color(color)
+}
+
+pub fn light(s: impl Into<String>, size: f32, color: Color32) -> RichText {
+    RichText::new(s).font(light_font(size)).color(color)
 }
 
 pub fn mono(s: impl Into<String>, size: f32, color: Color32) -> RichText {
@@ -316,7 +352,8 @@ pub fn button(ui: &mut Ui, look: Look, icon: Option<Icon>, label: &str, h: f32, 
         Look::Plain => (Color32::TRANSPARENT, Color32::TRANSPARENT, Color32::TRANSPARENT, Color32::TRANSPARENT, TEXT2),
     };
     let pad = if h >= 36.0 { 18.0 } else { 14.0 };
-    let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(size), Color32::PLACEHOLDER);
+    let font = if matches!(look, Look::Secondary | Look::Plain) { FontId::proportional(size) } else { medium_font(size) };
+    let g = ui.painter().layout_no_wrap(label.to_string(), font, Color32::PLACEHOLDER);
     let isz = (size + 1.0).round();
     let iw = if icon.is_some() { isz + 8.0 } else { 0.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(pad * 2.0 + iw + g.size().x, h), if enabled { Sense::click() } else { Sense::hover() });
@@ -346,10 +383,10 @@ pub fn button(ui: &mut Ui, look: Look, icon: Option<Icon>, label: &str, h: f32, 
     resp
 }
 
-/// The width [`button`] takes for this label.
+/// The width [`button`] takes for this label in a medium-weight look (primary, danger, amber, solid).
 pub fn button_width(ui: &Ui, label: &str, h: f32, size: f32, icon: bool) -> f32 {
     let pad = if h >= 36.0 { 18.0 } else { 14.0 };
-    let w = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(size), Color32::PLACEHOLDER).size().x;
+    let w = ui.painter().layout_no_wrap(label.to_string(), medium_font(size), Color32::PLACEHOLDER).size().x;
     pad * 2.0 + w + if icon { (size + 1.0).round() + 8.0 } else { 0.0 }
 }
 
@@ -470,4 +507,9 @@ pub fn logo(ui: &mut Ui) {
 /// Text at a position, anchored like `align`.
 pub fn paint_text(p: &egui::Painter, pos: Pos2, align: Align2, s: &str, size: f32, color: Color32) -> Rect {
     p.text(pos, align, s, FontId::proportional(size), color)
+}
+
+/// Like [`paint_text`] in the medium weight.
+pub fn paint_medium(p: &egui::Painter, pos: Pos2, align: Align2, s: &str, size: f32, color: Color32) -> Rect {
+    p.text(pos, align, s, medium_font(size), color)
 }

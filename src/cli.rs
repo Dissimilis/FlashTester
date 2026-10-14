@@ -74,6 +74,8 @@ enum Cmd {
     List,
     /// Show the identity of a drive: vendor, model, serial, USB ID, link speed.
     Info(TargetArg),
+    /// Show the drive's own SMART counters (read-only; works on the system disk too).
+    Smart(TargetArg),
     /// Full test: fill with a seeded pattern, then read everything back (h2testw-style).
     Test {
         #[command(flatten)]
@@ -344,8 +346,57 @@ fn list(json: bool) -> i32 {
     0
 }
 
-fn info(t: &TargetArg, json: bool) -> i32 {
-    let disk = match (&t.path, t.disk.as_deref()) {
+fn smart(t: &TargetArg, json: bool) -> i32 {
+    let d = match disk_of(t) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    if !platform::is_admin() {
+        eprintln!("Reading SMART data needs {}.", if cfg!(windows) { "administrator rights: run from an elevated terminal" } else { "root" });
+        return 2;
+    }
+    let s = match crate::smart::read(&d) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Disk {} ({}): no SMART data. {e}", d.id, d.name());
+            return 3;
+        }
+    };
+    let code = if s.alarms.is_empty() { 0 } else { 1 };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s).unwrap());
+        return code;
+    }
+    println!("Disk {}: {}, serial {}, firmware {} (read via {})", d.id, s.model, s.serial, s.firmware, s.via);
+    println!("Values as the drive's firmware reports them; FlashTester cannot check them.\n");
+    for a in &s.alarms {
+        println!("  ! {a}");
+    }
+    // The terminal may not be UTF-8 (serial consoles, Windows code pages): "41 C".
+    let ascii = |v: &str| v.replace('°', "");
+    for k in &s.key {
+        println!("  {:<42} {}", k.what.label(), ascii(&k.what.show(k.value)));
+    }
+    println!("\nAll counters:");
+    if s.raw.iter().any(|r| !r.worst.is_empty()) {
+        println!("  {:>3}  {:<44} {:>5} {:>5} {:>6}  Raw", "ID", "Attribute", "Value", "Worst", "Thresh");
+        for r in &s.raw {
+            println!("  {:>3}  {:<44} {:>5} {:>5} {:>6}  {}", r.id, r.name, r.value, r.worst, r.thresh, r.raw);
+        }
+    } else {
+        for r in &s.raw {
+            println!("  {:<44} {}", r.name, ascii(&r.value));
+        }
+    }
+    code
+}
+
+/// The disk a drive letter / folder is on, or the disk given with --disk.
+fn disk_of(t: &TargetArg) -> Result<platform::DiskInfo, String> {
+    match (&t.path, t.disk.as_deref()) {
         (Some(p), None) => {
             let mut s = p.clone();
             if cfg!(windows) && s.len() == 2 {
@@ -361,8 +412,11 @@ fn info(t: &TargetArg, json: bool) -> i32 {
         }
         (None, Some(n)) => platform::disk(n).map_err(|e| e.to_string()),
         _ => Err("Give a drive letter or --disk N.".into()),
-    };
-    let d = match disk {
+    }
+}
+
+fn info(t: &TargetArg, json: bool) -> i32 {
+    let d = match disk_of(t) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("{e}");
@@ -510,6 +564,7 @@ pub fn main() -> i32 {
         }
         Cmd::List => return list(cli.json),
         Cmd::Info(t) => return info(t, cli.json),
+        Cmd::Smart(t) => return smart(t, cli.json),
         Cmd::Clean { path } => {
             let w = match app::resolve_path(path) {
                 Ok(w) => w,

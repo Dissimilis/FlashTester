@@ -9,6 +9,7 @@ use crate::gui_kit::{self as k, Icon, Look};
 use crate::gui_map::{self, Curve};
 use crate::platform::{self, DiskInfo, VolumeInfo};
 use crate::report::{Report, Status, size};
+use crate::smart::{self, Smart};
 use egui::epaint::CornerRadius;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{self, Align, Align2, Color32, FontId, Frame, Label, Layout, Margin, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2, pos2, vec2};
@@ -120,6 +121,42 @@ struct Running {
     prompt_since: Option<Instant>,
 }
 
+/// The SMART view of one drive. The data is read on a thread: a slow USB bridge
+/// must not freeze the window.
+struct SmartView {
+    disk: DiskInfo,
+    rx: Option<std::sync::mpsc::Receiver<Result<Smart, String>>>,
+    data: Option<Result<Smart, String>>,
+    raw_open: bool,
+}
+
+impl SmartView {
+    fn open(d: &DiskInfo, admin: bool) -> SmartView {
+        let mut v = SmartView { disk: d.clone(), rx: None, data: None, raw_open: false };
+        if admin {
+            v.load();
+        }
+        v
+    }
+    fn load(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let d = self.disk.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(smart::read(&d));
+        });
+        self.rx = Some(rx);
+        self.data = None;
+    }
+    fn poll(&mut self) {
+        if let Some(rx) = &self.rx
+            && let Ok(r) = rx.try_recv()
+        {
+            self.data = Some(r);
+            self.rx = None;
+        }
+    }
+}
+
 /// What a click in the result view asks for.
 enum Act {
     Save(bool),
@@ -143,6 +180,9 @@ pub struct Gui {
     running: Option<Running>,
     live: Live,
     curves: Vec<Curve>,
+    /// Drive temperature during the job: (position in GB, °C).
+    temps: Vec<[f64; 2]>,
+    smart: Option<SmartView>,
     result: Option<Report>,
     saved: Vec<PathBuf>,
     log: Vec<String>,
@@ -175,6 +215,8 @@ impl Gui {
             running: None,
             live: Live::default(),
             curves: vec![],
+            temps: vec![],
+            smart: None,
             result: None,
             saved: vec![],
             log: vec![],
@@ -231,6 +273,7 @@ impl Gui {
         self.sel = Some(s);
         self.kind = Kind::for_target(raw)[0];
         self.confirm = false;
+        self.smart = None;
         self.result = None;
         self.error = None;
         self.saved.clear();
@@ -319,6 +362,8 @@ impl Gui {
         self.saved.clear();
         self.log.clear();
         self.curves.clear();
+        self.temps.clear();
+        self.smart = None;
         self.live = Live::default();
         self.log_open = false;
         self.summary_open = false;
@@ -344,6 +389,7 @@ impl Gui {
         {
             c.pts = s.series.iter().map(|&(x, y)| [x, y]).collect();
         }
+        self.temps = s.temps.iter().map(|&(x, y)| [x, y]).collect();
         r.prompt_since = match (&s.prompt, r.prompt_since) {
             (Some(_), None) => Some(Instant::now()),
             (Some(_), t) => t,
@@ -364,6 +410,7 @@ impl Gui {
         if !curves.is_empty() {
             self.curves = curves;
         }
+        self.temps = rep.smart.iter().flat_map(|m| &m.temps).map(|t| [t.pos as f64 / 1e9, t.c as f64]).collect();
         self.result = Some(rep);
         self.refresh();
     }
@@ -489,6 +536,7 @@ impl Gui {
     fn disk_card(&mut self, ui: &mut egui::Ui, d: &DiskInfo, locked: bool) {
         let mine = self.sel_disk().is_some_and(|x| x.id == d.id);
         let mut pick = None;
+        let mut open_smart = false;
         ui.scope(|ui| {
             if d.protected.is_some() {
                 ui.multiply_opacity(0.55);
@@ -515,6 +563,13 @@ impl Gui {
                             ui.add_space(32.0);
                             ui.add(Label::new(k::text(format!("Protected: {why}. Can't be selected."), 12.0, k::TEXT2)).wrap());
                         });
+                        // Reading SMART is read-only, so the system disk gets it too.
+                        if smart::possible(d) && !locked {
+                            ui.horizontal(|ui| {
+                                ui.add_space(32.0);
+                                open_smart = ui.link(k::text("SMART data", 12.0, k::LINK)).clicked();
+                            });
+                        }
                         ui.add_space(2.0);
                         return;
                     }
@@ -535,6 +590,9 @@ impl Gui {
         });
         if let Some(s) = pick {
             self.select(s);
+        }
+        if open_smart {
+            self.smart = Some(SmartView::open(d, self.admin));
         }
     }
 
@@ -580,6 +638,8 @@ impl Gui {
     fn main_view(&mut self, ui: &mut egui::Ui) {
         if self.running.is_some() {
             self.run_view(ui);
+        } else if self.smart.is_some() {
+            self.smart_view(ui);
         } else if self.result.is_some() {
             self.result_view(ui);
         } else if self.sel.is_none() {
@@ -644,7 +704,12 @@ impl Gui {
 
     fn setup_view(&mut self, ui: &mut egui::Ui) {
         let raw = self.raw();
-        self.target_card(ui, raw);
+        if self.target_card(ui, raw)
+            && let Some(d) = self.sel_disk()
+        {
+            self.smart = Some(SmartView::open(d, self.admin));
+            return;
+        }
         let avail = ui.available_rect_before_wrap();
         let h = avail.height().max(460.0);
         let left = Rect::from_min_size(avail.min, vec2(290.0, h));
@@ -655,8 +720,10 @@ impl Gui {
         ui.allocate_rect(Rect::from_min_size(avail.min, vec2(avail.width(), h)), Sense::hover());
     }
 
-    fn target_card(&self, ui: &mut egui::Ui, raw: bool) {
+    /// True when the SMART button was clicked.
+    fn target_card(&self, ui: &mut egui::Ui, raw: bool) -> bool {
         let (title, sub) = self.target_text();
+        let mut smart = false;
         let resp = Frame::new()
             .fill(k::PANEL)
             .stroke(Stroke::new(1.0, if raw { k::DANGER_STROKE } else { k::LINE }))
@@ -670,14 +737,18 @@ impl Gui {
                     ui.label(k::medium(title, 24.0, k::TEXT));
                     ui.add(Label::new(k::text(sub, 13.0, k::TEXT2)).truncate());
                 });
-                self.identity(ui);
+                smart = self.identity(ui);
             });
         let r = resp.response.rect;
         mode_band(ui, Rect::from_min_size(r.min, vec2(r.width(), 30.0)).shrink(1.0), raw, CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 }, None);
+        smart
     }
 
-    fn identity(&self, ui: &mut egui::Ui) {
-        let Some(d) = self.sel_disk() else { return };
+    /// True when the SMART button was clicked.
+    fn identity(&self, ui: &mut egui::Ui) -> bool {
+        let Some(d) = self.sel_disk() else { return false };
+        let mut smart = false;
+        let button = if smart::possible(d) { k::button_width(ui, "SMART data", 28.0, 12.0, false) + 12.0 } else { 0.0 };
         let usb = d.usb.as_ref();
         let items = [
             ("Device", d.name(), String::new(), false),
@@ -687,7 +758,7 @@ impl Gui {
             ("Link", usb.map(|u| u.link.clone()).filter(|l| !l.is_empty()).unwrap_or_else(|| d.bus.clone()), String::new(), usb.is_some_and(|u| u.slow_link)),
         ];
         let fr = [1.0, 1.3, 1.6, 1.4, 0.8];
-        let unit = (ui.available_width() - 4.0 * 12.0) / fr.iter().sum::<f32>();
+        let unit = (ui.available_width() - 4.0 * 12.0 - button) / fr.iter().sum::<f32>();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             for ((label, value, sub, warn), f) in items.into_iter().zip(fr) {
@@ -700,6 +771,12 @@ impl Gui {
                         ui.label(k::mono(sub, 11.0, k::TEXT3));
                     }
                 });
+            }
+            if button > 0.0 {
+                ui.add_space(-12.0 + (ui.available_width() - button).max(0.0));
+                smart = k::button(ui, Look::Secondary, None, "SMART data", 28.0, 12.0, true)
+                    .on_hover_text("The drive's own counters: errors, temperature, hours, data written")
+                    .clicked();
             }
         });
         let mut warns = vec![];
@@ -715,6 +792,59 @@ impl Gui {
                     k::chip(ui, Some(Icon::Alert), w, 24.0, 12.0, k::WARN_TINT, k::WARN_STROKE, k::WARN_TEXT);
                 }
             });
+        }
+        smart
+    }
+
+    fn smart_view(&mut self, ui: &mut egui::Ui) {
+        let admin = self.admin;
+        let Some(v) = &mut self.smart else { return };
+        v.poll();
+        if v.rx.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        let (mut back, mut again, mut relaunch) = (false, false, false);
+        let d = v.disk.clone();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            back = k::button(ui, Look::Secondary, None, "Back", 30.0, 13.0, true).clicked();
+            if admin {
+                again = k::icon_button(ui, Icon::Refresh, "Read again", v.rx.is_none(), 1.0).on_hover_text("Read again").clicked();
+            }
+        });
+        let ok = v.data.as_ref().and_then(|r| r.as_ref().ok());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.label(k::medium(ok.map(|s| s.model.clone()).unwrap_or_else(|| d.name()), 24.0, k::TEXT));
+            let sub = match ok {
+                Some(s) => format!("Disk {} · read via {} · serial {} · firmware {}", d.id, s.via, s.serial, s.firmware),
+                None => format!("Disk {} · {}", d.id, bus_text(&d)),
+            };
+            ui.add(Label::new(k::text(sub, 13.0, k::TEXT2)).truncate());
+        });
+        if !admin {
+            ui.label(k::text(format!("Reading SMART data needs {ADMIN} rights."), 14.0, k::WARN_TEXT));
+            relaunch = k::button(ui, Look::Amber, None, &format!("Restart as {ADMIN}"), 32.0, 13.0, true).clicked();
+        } else if v.rx.is_some() {
+            ui.label(k::text("Reading SMART data…", 14.0, k::TEXT2));
+        } else {
+            match &v.data {
+                Some(Ok(s)) => smart_body(ui, s, &mut v.raw_open),
+                Some(Err(e)) => {
+                    ui.label(k::text("No SMART data from this drive.", 16.0, k::TEXT));
+                    ui.add(Label::new(k::text(e, 13.0, k::TEXT3)).wrap());
+                }
+                None => {}
+            }
+        }
+        if again {
+            v.load();
+        }
+        if back {
+            self.smart = None;
+        }
+        if relaunch {
+            self.relaunch(ui.ctx());
         }
     }
 
@@ -1158,7 +1288,7 @@ impl Gui {
                 if let Some((real, claimed)) = capacity {
                     gui_map::capacity(ui, real, claimed, w);
                 } else if graph {
-                    gui_map::graph(ui, &self.curves, w);
+                    gui_map::graph(ui, &self.curves, &self.temps, w);
                 }
             });
         });
@@ -1410,6 +1540,78 @@ fn info_card(ui: &mut egui::Ui, fill: Color32, stroke: Color32, head: &str, head
 }
 
 /// "E:" for "E:\", the mount point elsewhere.
+/// The SMART view's content: alarms, the important counters, then every counter.
+fn smart_body(ui: &mut egui::Ui, s: &Smart, raw_open: &mut bool) {
+    ui.add(Label::new(k::text("Values as the drive's firmware reports them. FlashTester cannot check them, and the firmware of a fake drive can lie.", 13.0, k::TEXT2)).wrap());
+    if !s.alarms.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            for a in &s.alarms {
+                k::chip(ui, Some(Icon::Alert), a, 24.0, 12.0, k::DANGER_TINT, k::DANGER_STROKE, k::DANGER_TEXT);
+            }
+        });
+    }
+    Frame::new().fill(k::PANEL).stroke(Stroke::new(1.0, k::LINE_CARD)).corner_radius(6).inner_margin(16).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 10.0;
+        ui.label(k::medium("Most important", 12.0, k::TEXT3));
+        if s.key.is_empty() {
+            ui.label(k::text("The drive reports none of the usual counters.", 13.0, k::TEXT2));
+        }
+        egui::Grid::new("smart-key").num_columns(2).spacing(vec2(40.0, 10.0)).show(ui, |ui| {
+            for key in &s.key {
+                let warn = key.what.bad() && key.value > 0;
+                ui.label(k::text(key.what.label(), 14.0, k::TEXT2)).on_hover_text(key.what.help());
+                ui.label(k::medium(key.what.show(key.value), 14.0, if warn { k::WARN_TEXT } else { k::TEXT }));
+                ui.end_row();
+            }
+        });
+    });
+    let r = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            k::icon(ui, if *raw_open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.0, k::TEXT2);
+            ui.label(k::text(format!("All counters ({})", s.raw.len()), 13.0, k::TEXT2));
+        })
+        .response;
+    let r = ui.interact(r.rect, egui::Id::new("smart-raw-toggle"), Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, "All counters"));
+    k::pointer_on_hover(&r);
+    if r.clicked() {
+        *raw_open = !*raw_open;
+    }
+    if !*raw_open {
+        return;
+    }
+    let ata = s.raw.iter().any(|r| !r.worst.is_empty());
+    Frame::new().fill(k::BAR).stroke(Stroke::new(1.0, k::LINE_SUBTLE)).corner_radius(4).inner_margin(12).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::Grid::new("smart-raw").striped(false).spacing(vec2(24.0, 6.0)).show(ui, |ui| {
+            let head: &[&str] = if ata { &["ID", "Attribute", "Value", "Worst", "Threshold", "Raw"] } else { &["Field", "Value"] };
+            for h in head {
+                ui.label(k::medium(*h, 11.0, k::TEXT3));
+            }
+            ui.end_row();
+            for r in &s.raw {
+                if ata {
+                    ui.label(k::mono(&r.id, 12.0, k::TEXT3));
+                    ui.label(k::text(&r.name, 13.0, k::TEXT2));
+                    for c in [&r.value, &r.worst, &r.thresh, &r.raw] {
+                        ui.label(k::mono(c, 12.0, k::TEXT));
+                    }
+                } else {
+                    ui.label(k::text(&r.name, 13.0, k::TEXT2));
+                    ui.label(k::mono(&r.value, 12.0, k::TEXT));
+                }
+                ui.end_row();
+            }
+        });
+        if ata {
+            ui.add_space(6.0);
+            ui.add(Label::new(k::text("Names are the usual meanings; vendors reuse numbers for other things. Pre-fail: the drive treats reaching the threshold as imminent failure.", 12.0, k::TEXT3)).wrap());
+        }
+    });
+}
+
 fn vol_key(m: &str) -> String {
     let t = m.trim_end_matches(['\\', '/']);
     if t.is_empty() { m.to_string() } else { t.to_string() }

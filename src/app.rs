@@ -83,6 +83,7 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
     }
     let t0 = Instant::now();
     let _awake = platform::KeepAwake::new();
+    let watch = smart_disk(job).filter(|_| platform::is_admin()).and_then(|d| crate::smart::Watch::start(&d, ctx));
     let mut rep = match job {
         Job::Test { w, o } => fulltest::run_test(w, o, ctx),
         Job::Verify { w, h2w, manifest, loops } => verify(w, *h2w, manifest.as_deref(), *loops, ctx),
@@ -94,10 +95,26 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
         Job::Bench { w, size, write } => bench(w, *size, *write, ctx),
         Job::Fix { disk, size, fs, label } => fix(disk, size, fs, label, ctx),
     };
+    if let Some(w) = watch {
+        w.finish(&mut rep);
+    }
     if rep.finished.is_empty() {
         rep.finish(t0);
     }
     rep
+}
+
+/// The drive a job runs on, for the SMART before/after snapshot. Not for the
+/// plug-pull test (the drive vanishes on purpose) or fix (diskpart rewrites it).
+fn smart_disk(job: &Job) -> Option<DiskInfo> {
+    let w = match job {
+        Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w } | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::SmallFiles { w, .. } | Job::Bench { w, .. } => w,
+        Job::PlugPull { .. } | Job::Fix { .. } => return None,
+    };
+    match w {
+        Where::Disk(d) => Some(d.clone()),
+        Where::Dir { disk, .. } => disk.clone(),
+    }
 }
 
 fn verify(w: &Where, h2w: bool, manifest: Option<&Path>, loops: u32, ctx: &Ctx) -> Report {

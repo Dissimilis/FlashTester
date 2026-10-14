@@ -756,3 +756,98 @@ pub fn fs_id_path(p: &Path) -> io::Result<u64> {
     let f = OpenOptions::new().access_mode(0).share_mode(7).custom_flags(0x0200_0000).open(p)?;
     fs_id(&f)
 }
+
+// SMART pass-through (read-only commands only; see smart.rs). The buffered IOCTLs
+// carry header and data in one buffer, so there are no alignment rules. Offsets
+// are the 64-bit structure layouts.
+
+const IOCTL_SCSI_PASS_THROUGH: u32 = 0x0004_D004;
+const IOCTL_ATA_PASS_THROUGH: u32 = 0x0004_D02C;
+const _: () = assert!(std::mem::size_of::<usize>() == 8);
+
+/// A SCSI command with data in or out: SCSI_PASS_THROUGH (56 bytes), 32 bytes of sense, data.
+pub fn scsi(d: &DiskInfo, cdb: &[u8], dir: super::Dir) -> io::Result<Vec<u8>> {
+    const HDR: usize = 56;
+    const DATA: usize = HDR + 32;
+    let (n, data_in) = match dir {
+        super::Dir::In(n) => (n, 1u8),
+        super::Dir::Out(b) => (b.len(), 0u8),
+    };
+    let mut b = vec![0u8; DATA + n];
+    b[0..2].copy_from_slice(&(HDR as u16).to_le_bytes());
+    b[6] = cdb.len() as u8;
+    b[7] = 32;
+    b[8] = data_in;
+    b[12..16].copy_from_slice(&(n as u32).to_le_bytes());
+    b[16..20].copy_from_slice(&10u32.to_le_bytes());
+    b[24..32].copy_from_slice(&(DATA as u64).to_le_bytes());
+    b[32..36].copy_from_slice(&(HDR as u32).to_le_bytes());
+    b[36..36 + cdb.len()].copy_from_slice(cdb);
+    if let super::Dir::Out(x) = dir {
+        b[DATA..].copy_from_slice(x);
+    }
+    let f = open_dev(&d.path, GENERIC_READ | GENERIC_WRITE)?;
+    let inp = b.clone();
+    ioctl(&f, IOCTL_SCSI_PASS_THROUGH, &inp, &mut b)?;
+    if b[2] != 0 {
+        let s = &b[HDR..DATA];
+        return Err(io::Error::other(format!("SCSI status {:#04x}, sense {:x}/{:02x}/{:02x}", b[2], s[2] & 0xF, s[12], s[13])));
+    }
+    let got = (u32_at(&b, 12) as usize).min(n);
+    Ok(if data_in == 1 { b[DATA..DATA + got].to_vec() } else { vec![] })
+}
+
+/// A native ATA command reading one sector: ATA_PASS_THROUGH_EX (48 bytes), then the data.
+pub fn ata(d: &DiskInfo, a: super::Ata) -> io::Result<Vec<u8>> {
+    const HDR: usize = 48;
+    let mut b = vec![0u8; HDR + 512];
+    b[0..2].copy_from_slice(&(HDR as u16).to_le_bytes());
+    b[2..4].copy_from_slice(&3u16.to_le_bytes()); // ATA_FLAGS_DRDY_REQUIRED | ATA_FLAGS_DATA_IN
+    b[8..12].copy_from_slice(&512u32.to_le_bytes());
+    b[12..16].copy_from_slice(&10u32.to_le_bytes());
+    b[24..32].copy_from_slice(&(HDR as u64).to_le_bytes());
+    // CurrentTaskFile: features, count, LBA low, mid, high, device, command.
+    b[40..47].copy_from_slice(&[a.features, 1, 0, a.lba_mid, a.lba_high, 0, a.command]);
+    let f = open_dev(&d.path, GENERIC_READ | GENERIC_WRITE)?;
+    let inp = b.clone();
+    ioctl(&f, IOCTL_ATA_PASS_THROUGH, &inp, &mut b)?;
+    // The status register comes back in place of the command byte; bit 0 is ERR.
+    if b[46] & 1 != 0 {
+        return Err(io::Error::other(format!("ATA error {:#04x}", b[40])));
+    }
+    Ok(b[HDR..].to_vec())
+}
+
+/// NVMe Identify (op 06h) or Get Log Page (op 02h). The inbox NVMe driver only
+/// takes these through IOCTL_STORAGE_QUERY_PROPERTY (protocol-specific data).
+pub fn nvme(d: &DiskInfo, op: u8, _nsid: u32, cdw10: u32, len: usize) -> io::Result<Vec<u8>> {
+    let data_type = match op {
+        0x06 => 1u32, // NVMeDataTypeIdentify, value = CNS
+        0x02 => 2,    // NVMeDataTypeLogPage, value = log id
+        _ => return Err(io::Error::from(io::ErrorKind::Unsupported)),
+    };
+    let f = open_dev(&d.path, GENERIC_READ | GENERIC_WRITE)?;
+    let mut last = io::Error::from(io::ErrorKind::Unsupported);
+    // StorageAdapterProtocolSpecificProperty, then StorageDeviceProtocolSpecificProperty.
+    for prop in [49u32, 50] {
+        // STORAGE_PROPERTY_QUERY, with STORAGE_PROTOCOL_SPECIFIC_DATA (40 bytes) at 8, data after it.
+        let mut b = vec![0u8; 48 + len];
+        b[0..4].copy_from_slice(&prop.to_le_bytes());
+        b[8..12].copy_from_slice(&3u32.to_le_bytes()); // ProtocolTypeNvme
+        b[12..16].copy_from_slice(&data_type.to_le_bytes());
+        b[16..20].copy_from_slice(&(cdw10 & 0xFF).to_le_bytes());
+        b[24..28].copy_from_slice(&40u32.to_le_bytes());
+        b[28..32].copy_from_slice(&(len as u32).to_le_bytes());
+        let inp = b.clone();
+        match ioctl(&f, IOCTL_STORAGE_QUERY_PROPERTY, &inp, &mut b) {
+            // Back comes STORAGE_PROTOCOL_DATA_DESCRIPTOR: the same protocol data at 8.
+            Ok(_) => {
+                let off = 8 + u32_at(&b, 24) as usize;
+                let n = (u32_at(&b, 28) as usize).min(len).min(b.len().saturating_sub(off));
+                return Ok(b[off..off + n].to_vec());
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}

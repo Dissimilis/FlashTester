@@ -124,6 +124,23 @@ pub fn placeholder_serial(s: &str) -> Option<String> {
     None
 }
 
+/// Data direction of a SCSI pass-through command (SMART reads; see `smart.rs`).
+pub enum Dir<'a> {
+    /// Read this many bytes.
+    In(usize),
+    /// Send these bytes.
+    Out(&'a [u8]),
+}
+
+/// An ATA command with 28-bit registers that reads one 512-byte sector (PIO data-in).
+#[derive(Clone, Copy)]
+pub struct Ata {
+    pub command: u8,
+    pub features: u8,
+    pub lba_mid: u8,
+    pub lba_high: u8,
+}
+
 /// Partition device for partition 1 of a Linux disk (sda -> sda1, nvme0n1 -> nvme0n1p1).
 pub fn first_partition(disk_path: &str) -> String {
     if disk_path.ends_with(|c: char| c.is_ascii_digit()) { format!("{disk_path}p1") } else { format!("{disk_path}1") }

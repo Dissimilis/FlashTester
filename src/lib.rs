@@ -11,6 +11,7 @@ pub mod platform;
 pub mod probe;
 pub mod report;
 pub mod scan;
+pub mod smart;
 pub mod trust;
 #[cfg(any(windows, target_os = "linux"))]
 pub mod gui;

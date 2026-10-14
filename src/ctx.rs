@@ -34,6 +34,8 @@ pub struct Status {
     pub base: u64,
     /// Bad regions found so far: (start, end, kind), for the live block map.
     pub marks: Vec<(u64, u64, String)>,
+    /// (position in GB, °C) the drive reported during the job, for the speed graph.
+    pub temps: Vec<(f64, f64)>,
 }
 
 impl Ctx {
@@ -73,6 +75,9 @@ impl Ctx {
         if s.marks.len() < 10_000 {
             s.marks.push((start, end, kind.to_string()));
         }
+    }
+    pub fn temp(&self, pos: u64, celsius: u64) {
+        self.inner.status.lock().unwrap().temps.push((pos as f64 / 1e9, celsius as f64));
     }
     pub fn log(&self, msg: impl Into<String>) {
         self.inner.status.lock().unwrap().log.push(msg.into());

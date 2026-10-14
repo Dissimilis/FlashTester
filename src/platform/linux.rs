@@ -809,3 +809,110 @@ fn in_use_check(id: &str) -> io::Result<()> {
     }
     if held.is_empty() { Ok(()) } else { Err(io::Error::other(format!("disk {id} is in use by {} (LVM, RAID, crypt or cache); release it first", held.join(", ")))) }
 }
+
+// SMART pass-through (read-only commands only; see smart.rs). The device is opened
+// read-only and not exclusively, so it works next to a running raw test.
+
+/// struct sg_io_hdr from <scsi/sg.h>.
+#[repr(C)]
+struct SgIoHdr {
+    interface_id: i32,
+    dxfer_direction: i32,
+    cmd_len: u8,
+    mx_sb_len: u8,
+    iovec_count: u16,
+    dxfer_len: u32,
+    dxferp: *mut libc::c_void,
+    cmdp: *const u8,
+    sbp: *mut u8,
+    timeout: u32,
+    flags: u32,
+    pack_id: i32,
+    usr_ptr: *mut libc::c_void,
+    status: u8,
+    masked_status: u8,
+    msg_status: u8,
+    sb_len_wr: u8,
+    host_status: u16,
+    driver_status: u16,
+    resid: i32,
+    duration: u32,
+    info: u32,
+}
+
+fn smart_open(d: &DiskInfo) -> io::Result<File> {
+    OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&d.path)
+}
+
+/// A SCSI command through SG_IO. SATA disks go this way too: libata translates SAT.
+pub fn scsi(d: &DiskInfo, cdb: &[u8], dir: super::Dir) -> io::Result<Vec<u8>> {
+    let (mut buf, direction) = match dir {
+        super::Dir::In(n) => (vec![0u8; n], -3), // SG_DXFER_FROM_DEV
+        super::Dir::Out(b) => (b.to_vec(), -2),  // SG_DXFER_TO_DEV
+    };
+    let mut sense = [0u8; 32];
+    let mut h = SgIoHdr {
+        interface_id: b'S' as i32,
+        dxfer_direction: direction,
+        cmd_len: cdb.len() as u8,
+        mx_sb_len: sense.len() as u8,
+        iovec_count: 0,
+        dxfer_len: buf.len() as u32,
+        dxferp: buf.as_mut_ptr() as *mut libc::c_void,
+        cmdp: cdb.as_ptr(),
+        sbp: sense.as_mut_ptr(),
+        timeout: 10_000,
+        flags: 0,
+        pack_id: 0,
+        usr_ptr: std::ptr::null_mut(),
+        status: 0,
+        masked_status: 0,
+        msg_status: 0,
+        sb_len_wr: 0,
+        host_status: 0,
+        driver_status: 0,
+        resid: 0,
+        duration: 0,
+        info: 0,
+    };
+    let f = smart_open(d)?;
+    if unsafe { libc::ioctl(f.as_raw_fd(), 0x2285u32 as _, &mut h) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if h.status != 0 || h.host_status != 0 || h.driver_status & 0xF != 0 {
+        return Err(io::Error::other(format!("SCSI status {:#04x}, sense {:x}/{:02x}/{:02x}", h.status, sense[2] & 0xF, sense[12], sense[13])));
+    }
+    if direction == -2 {
+        return Ok(vec![]);
+    }
+    buf.truncate(buf.len().saturating_sub(h.resid.max(0) as usize));
+    Ok(buf)
+}
+
+/// Native ATA: libata takes SAT, so it is the same as over USB.
+pub fn ata(d: &DiskInfo, a: super::Ata) -> io::Result<Vec<u8>> {
+    scsi(d, &crate::smart::sat_cdb(a), super::Dir::In(512))
+}
+
+/// An NVMe admin command with data in: NVME_IOCTL_ADMIN_CMD on the namespace device.
+pub fn nvme(d: &DiskInfo, op: u8, nsid: u32, cdw10: u32, len: usize) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; len];
+    // struct nvme_passthru_cmd (72 bytes): opcode, flags, rsvd, nsid, cdw2, cdw3,
+    // metadata, addr, metadata_len, data_len, cdw10..15, timeout_ms, result.
+    let mut c = [0u8; 72];
+    c[0] = op;
+    c[4..8].copy_from_slice(&nsid.to_le_bytes());
+    c[24..32].copy_from_slice(&(buf.as_mut_ptr() as u64).to_le_bytes());
+    c[36..40].copy_from_slice(&(len as u32).to_le_bytes());
+    c[40..44].copy_from_slice(&cdw10.to_le_bytes());
+    c[64..68].copy_from_slice(&10_000u32.to_le_bytes());
+    let f = smart_open(d)?;
+    let r = unsafe { libc::ioctl(f.as_raw_fd(), 0xC048_4E41u32 as _, c.as_mut_ptr()) };
+    if r < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if r > 0 {
+        return Err(io::Error::other(format!("NVMe status {r:#x}")));
+    }
+    Ok(buf)
+}

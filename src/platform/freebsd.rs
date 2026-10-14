@@ -793,6 +793,95 @@ fn same_disk(d: &DiskInfo) -> Result<(), String> {
     if held.is_empty() { Ok(()) } else { Err(format!("disk {} is in use ({} open: mounted, swap, ZFS or another GEOM layer); release it first", d.id, held.join(", "))) }
 }
 
+// SMART pass-through (read-only commands only; see smart.rs). ATA and SCSI go
+// through `camcontrol cmd`, which moves the data over stdin/stdout ("-"); NVMe
+// through the controller's pass-through ioctl.
+
+fn camcmd(d: &DiskInfo, args: &[&str], input: Option<&[u8]>) -> io::Result<Vec<u8>> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut c = Command::new("camcontrol");
+    c.args(["cmd", &d.id, "-t", "10"]).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn()?;
+    if let Some(i) = input {
+        child.stdin.take().unwrap().write_all(i)?;
+    }
+    drop(child.stdin.take());
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(other(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    Ok(out.stdout)
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+pub fn scsi(d: &DiskInfo, cdb: &[u8], dir: super::Dir) -> io::Result<Vec<u8>> {
+    let cdb = hex(cdb);
+    match dir {
+        super::Dir::In(n) => camcmd(d, &["-c", &cdb, "-i", &n.to_string(), "-"], None),
+        super::Dir::Out(b) => camcmd(d, &["-c", &cdb, "-o", &b.len().to_string(), "-"], Some(b)).map(|_| vec![]),
+    }
+}
+
+/// Native ATA (ada disks). camcontrol's 12 bytes: command, features, LBA low, mid,
+/// high, device, LBA low/mid/high (exp), features (exp), sector count, count (exp).
+pub fn ata(d: &DiskInfo, a: super::Ata) -> io::Result<Vec<u8>> {
+    let regs = hex(&[a.command, a.features, 0, a.lba_mid, a.lba_high, 0, 0, 0, 0, 0, 1, 0]);
+    camcmd(d, &["-a", &regs, "-i", "512", "-"], None)
+}
+
+/// The NVMe controller device (/dev/nvmeN) behind an nda or nvd disk: nda sits on
+/// the controller's CAM bus; for nvd, the controller whose serial matches.
+fn nvme_ctrl(d: &DiskInfo) -> io::Result<File> {
+    let open = |p: &str| OpenOptions::new().read(true).write(true).open(p);
+    if let Some(sim) = d.instance_id.split_whitespace().next().filter(|s| s.starts_with("nvme")) {
+        return open(&format!("/dev/{sim}"));
+    }
+    let ctrls: Vec<String> = std::fs::read_dir("/dev")?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.strip_prefix("nvme").is_some_and(|u| !u.is_empty() && u.chars().all(|c| c.is_ascii_digit())))
+        .collect();
+    for c in &ctrls {
+        let Ok(f) = open(&format!("/dev/{c}")) else { continue };
+        let serial = nvme_pt(&f, 0x06, 0, 1, 4096).map(|id| String::from_utf8_lossy(&id[4..24]).trim().to_string()).unwrap_or_default();
+        if ctrls.len() == 1 || (!serial.is_empty() && serial == d.serial.trim()) {
+            return Ok(f);
+        }
+    }
+    Err(other(format!("no NVMe controller found for {}", d.id)))
+}
+
+/// NVME_PASSTHROUGH_CMD with struct nvme_pt_command (104 bytes): the 64-byte
+/// command, the 16-byte completion, buffer pointer, length, is_read, lock pointer.
+fn nvme_pt(f: &File, op: u8, nsid: u32, cdw10: u32, len: usize) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; len];
+    let mut pt = [0u64; 13];
+    let b = unsafe { std::slice::from_raw_parts_mut(pt.as_mut_ptr() as *mut u8, 104) };
+    b[0] = op;
+    b[4..8].copy_from_slice(&nsid.to_le_bytes());
+    b[40..44].copy_from_slice(&cdw10.to_le_bytes());
+    b[80..88].copy_from_slice(&(buf.as_mut_ptr() as u64).to_le_bytes());
+    b[88..92].copy_from_slice(&(len as u32).to_le_bytes());
+    b[92..96].copy_from_slice(&1u32.to_le_bytes());
+    if unsafe { libc::ioctl(f.as_raw_fd(), 0xC068_6E00u32 as _, pt.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let b = unsafe { std::slice::from_raw_parts(pt.as_ptr() as *const u8, 104) };
+    let status = u16::from_le_bytes([b[78], b[79]]) & 0xFFFE;
+    if status != 0 {
+        return Err(other(format!("NVMe status {:#x}", status >> 1)));
+    }
+    Ok(buf)
+}
+
+pub fn nvme(d: &DiskInfo, op: u8, nsid: u32, cdw10: u32, len: usize) -> io::Result<Vec<u8>> {
+    nvme_pt(&nvme_ctrl(d)?, op, nsid, cdw10, len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

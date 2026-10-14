@@ -145,6 +145,9 @@ pub struct Report {
     pub bench: Option<crate::perf::BenchResult>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub identity_changes: Vec<String>,
+    /// What the drive's own SMART counters did during the run.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub smart: Option<crate::smart::SmartRun>,
 }
 
 pub fn tool_name() -> String {
@@ -298,6 +301,16 @@ impl Report {
             let _ = writeln!(s, "\nIdentity changed across replug:");
             for c in &self.identity_changes {
                 let _ = writeln!(s, "  {c}");
+            }
+        }
+        if let Some(m) = &self.smart {
+            let _ = writeln!(s, "\nDrive's own counters (SMART via {}):", m.via);
+            if let (Some(lo), Some(hi)) = (m.temps.iter().map(|t| t.c).min(), m.temps.iter().map(|t| t.c).max()) {
+                let range = if lo == hi { lo.to_string() } else { format!("{lo}-{hi}") };
+                let _ = writeln!(s, "  Temperature {range} C");
+            }
+            for c in &m.changes {
+                let _ = writeln!(s, "  {}: {} -> {}", c.what.label(), c.what.show(c.before), c.what.show(c.after));
             }
         }
         if !self.warnings.is_empty() {

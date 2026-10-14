@@ -317,21 +317,38 @@ fn smooth(pts: &[[f64; 2]], max_slices: usize) -> Vec<[f64; 2]> {
     acc.into_iter().filter(|a| a.2 > 0).map(|(x, inv, n)| [x / n as f64, n as f64 / inv]).collect()
 }
 
-/// Speed by position: write blue, read green.
-pub fn graph(ui: &mut egui::Ui, curves: &[Curve], w: f32) {
+/// Speed by position: write blue, read green; the drive's temperature in orange
+/// on its own right-hand scale (`temps`: position in GB, °C).
+pub fn graph(ui: &mut egui::Ui, curves: &[Curve], temps: &[[f64; 2]], w: f32) {
+    // Jobs that don't move along the disk (IOPS) give every reading the same position.
+    let temps = if temps.iter().any(|t| t[0] != temps[0][0]) { temps } else { &[] };
     ui.spacing_mut().item_spacing.y = 8.0;
     let (head, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
     let p = ui.painter();
     k::paint_medium(p, head.left_center(), egui::Align2::LEFT_CENTER, "Speed (MB/s) by position", 12.0, k::TEXT3);
     let mut x = head.right();
-    for (read, name, color) in [(true, "Read", k::OK), (false, "Write", k::ACCENT)] {
-        if curves.iter().any(|c| c.read == read && c.pts.len() > 1) {
+    for (read, name, color) in [(None, "Temp", k::ORANGE), (Some(true), "Read", k::OK), (Some(false), "Write", k::ACCENT)] {
+        let shown = match read {
+            Some(r) => curves.iter().any(|c| c.read == r && c.pts.len() > 1),
+            None => temps.len() > 1,
+        };
+        if shown {
             let r = k::paint_text(p, pos2(x, head.center().y), egui::Align2::RIGHT_CENTER, name, 11.0, k::TEXT2);
             p.line_segment([pos2(r.left() - 17.0, r.center().y), pos2(r.left() - 5.0, r.center().y)], Stroke::new(2.0, color));
             x = r.left() - 27.0;
         }
     }
-    egui_plot::Plot::new(ui.id().with("speed"))
+    let lines: Vec<(bool, Vec<[f64; 2]>)> = curves.iter().filter(|c| c.pts.len() > 1).map(|c| (c.read, smooth(&c.pts, 60))).collect();
+    // 100 °C sits at the top of the speed range.
+    let scale = lines.iter().flat_map(|l| l.1.iter().map(|p| p[1])).fold(1.0, f64::max) * 1.1 / 100.0;
+    let mut plot = egui_plot::Plot::new(ui.id().with("speed"));
+    if temps.len() > 1 {
+        plot = plot.custom_y_axes(vec![
+            egui_plot::AxisHints::new_y(),
+            egui_plot::AxisHints::new_y().placement(egui_plot::HPlacement::Right).formatter(move |m, _| format!("{:.0} °C", m.value / scale)),
+        ]);
+    }
+    plot
         .width(w)
         .height(190.0)
         .show_background(false)
@@ -348,9 +365,20 @@ pub fn graph(ui: &mut egui::Ui, curves: &[Curve], w: f32) {
         .y_grid_spacer(egui_plot::log_grid_spacer(5))
         .x_axis_label(k::text("position (GB)", 10.0, k::TEXT3))
         .show(ui, |pl| {
-            for c in curves.iter().filter(|c| c.pts.len() > 1) {
-                let (name, color) = if c.read { ("Read", k::OK) } else { ("Write", k::ACCENT) };
-                pl.line(egui_plot::Line::new(name, smooth(&c.pts, 60)).color(color).width(1.5));
+            for (read, pts) in lines {
+                let (name, color) = if read { ("Read", k::OK) } else { ("Write", k::ACCENT) };
+                pl.line(egui_plot::Line::new(name, pts).color(color).width(1.5));
+            }
+            // A new pass starts again at position 0: one line per run of rising positions.
+            let mut seg: Vec<[f64; 2]> = vec![];
+            for t in temps.iter().chain([&[f64::NEG_INFINITY, 0.0]]) {
+                if seg.last().is_some_and(|l| t[0] < l[0]) {
+                    if seg.len() > 1 {
+                        pl.line(egui_plot::Line::new("Temp", std::mem::take(&mut seg)).color(k::ORANGE).width(1.5));
+                    }
+                    seg.clear();
+                }
+                seg.push([t[0], t[1] * scale]);
             }
         });
 }

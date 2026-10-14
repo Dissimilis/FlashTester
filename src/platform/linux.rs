@@ -175,8 +175,9 @@ fn disks_of_block(majmin: (u64, u64)) -> io::Result<Vec<String>> {
     Ok(out)
 }
 
-const VIRTUAL_FS: &[&str] = &["tmpfs", "overlay", "ramfs", "devtmpfs", "proc", "sysfs", "cgroup2", "autofs", "fuse.mergerfs"];
-const RAM_FS: &[&str] = &["tmpfs", "ramfs"];
+// rootfs: the initramfs itself when the system never pivots to a disk (Tiny Core).
+const VIRTUAL_FS: &[&str] = &["tmpfs", "overlay", "ramfs", "rootfs", "devtmpfs", "proc", "sysfs", "cgroup2", "autofs", "fuse.mergerfs"];
+const RAM_FS: &[&str] = &["tmpfs", "ramfs", "rootfs"];
 
 /// Disks behind a mount: by its device number, or its source device when the
 /// mount has an anonymous device number (btrfs).
@@ -734,6 +735,8 @@ pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str
             return Err(format!("{c} is not installed; the disk was not changed"));
         }
     }
+    // exfat-utils' mkfs.exfat (mkexfatfs, FUSE exFAT) takes -n for the label; exfatprogs' takes -L.
+    let exfat_label = if fs == "exfat" && run(mkfs, &["-V"], None).unwrap_or_else(|e| e).contains("mkexfatfs") { "-n" } else { "-L" };
     // Re-check right before each destructive step: device names can be reused.
     same_disk(disk)?;
     let mut log = run("sfdisk", &["--wipe", "always", "--wipe-partitions", "always", &disk.path], Some(&script))?;
@@ -752,7 +755,7 @@ pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str
         return Err(format!("{part} does not belong to the selected disk; not formatting it"));
     }
     let args: Vec<&str> = match fs {
-        "exfat" => vec!["-L", label, &part],
+        "exfat" => vec![exfat_label, label, &part],
         "fat32" => vec!["-F", "32", "-n", label, &part],
         "ntfs" => vec!["-f", "-L", label, &part],
         _ => vec!["-F", "-L", label, &part],

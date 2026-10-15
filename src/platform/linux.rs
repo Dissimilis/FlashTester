@@ -262,8 +262,9 @@ fn overlay_layers<'a>(o: &Mount, ms: &'a [Mount]) -> io::Result<(Vec<&'a Mount>,
 }
 
 /// What overlay layers mounted out of sight use: the disks behind loop devices
-/// not mounted here, and disks whose partitions are busy (an exclusive open fails)
-/// without a visible mount, swap or holder. Needs root; fails if it can't check.
+/// (mounted ones too when their file lies on a disk: casper also mounts its
+/// squashfs at /rofs), and disks whose partitions are busy (an exclusive open
+/// fails) without a visible mount, swap or holder. Needs root; fails if it can't check.
 fn hidden_layer_disks(ms: &[Mount]) -> io::Result<Vec<String>> {
     let swaps = read("/proc/swaps");
     let mm = |sys: &Path| read(sys.join("dev")).split_once(':').map(|(a, b)| (a.parse().unwrap_or(0), b.parse().unwrap_or(0))).unwrap_or((0, 0));
@@ -271,7 +272,9 @@ fn hidden_layer_disks(ms: &[Mount]) -> io::Result<Vec<String>> {
     for e in std::fs::read_dir("/sys/block")?.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if name.starts_with("loop") {
-            if e.path().join("loop/backing_file").exists() && !ms.iter().any(|m| m.majmin == mm(&e.path())) {
+            // Mounted loops on files in RAM or on the overlay itself (snaps) are skipped.
+            let on_disk = loop_backing(&name).map(|b| b.0 != 0).unwrap_or(true);
+            if e.path().join("loop/backing_file").exists() && (on_disk || !ms.iter().any(|m| m.majmin == mm(&e.path()))) {
                 out.extend(disks_of_block(mm(&e.path()))?);
             }
             continue;
@@ -308,10 +311,21 @@ pub fn protected_disks() -> io::Result<BTreeMap<String, String>> {
     for d in system_disks(root, &ms, 0).map_err(|e| io::Error::other(format!("cannot map / to a disk: {e}")))? {
         m.entry(d).or_insert_with(|| "system disk (holds /)".to_string());
     }
-    for point in ["/boot", "/boot/efi", "/efi", "/usr", "/var"] {
+    // NixOS and Guix keep the system in their store, which may be its own mount
+    // (NixOS live: an overlay on a squashfs from the boot medium).
+    for point in ["/boot", "/boot/efi", "/efi", "/usr", "/var", "/nix", "/nix/store", "/gnu/store"] {
         if let Some(x) = ms.iter().rev().find(|x| x.point == point) {
             for d in system_disks(x, &ms, 0).map_err(|e| io::Error::other(format!("cannot map {point} to a disk: {e}")))? {
                 m.entry(d).or_insert_with(|| format!("holds {point}"));
+            }
+        }
+    }
+    // The running kernel's modules: diskless Alpine loop-mounts them (/.modloop) from
+    // a file on its boot medium, which none of the mount points above shows.
+    if let Ok(dir) = std::fs::canonicalize(format!("/lib/modules/{}", read("/proc/sys/kernel/osrelease"))) {
+        if let Some(x) = ms.iter().filter(|x| dir.starts_with(&x.point)).max_by_key(|x| x.point.len()) {
+            for d in system_disks(x, &ms, 0).map_err(|e| io::Error::other(format!("cannot map the kernel modules to a disk: {e}")))? {
+                m.entry(d).or_insert_with(|| "holds the kernel modules".to_string());
             }
         }
     }
@@ -319,8 +333,16 @@ pub fn protected_disks() -> io::Result<BTreeMap<String, String>> {
         let Some(dev) = l.split_whitespace().next() else { continue };
         let dev = unescape(dev);
         let md = std::fs::metadata(&dev)?;
-        let mm = if md.file_type().is_file() { (libc::major(md.dev()) as u64, libc::minor(md.dev()) as u64) } else { (libc::major(md.rdev()) as u64, libc::minor(md.rdev()) as u64) };
-        for d in disks_of_block(mm).map_err(|e| io::Error::other(format!("cannot map swap {dev} to a disk: {e}")))? {
+        // A swap file: map the mount that holds it. A file on a btrfs subvolume has an
+        // anonymous device number (Arch's cloud image: /swap/swapfile), not a disk's.
+        let disks = if md.file_type().is_file() {
+            let path = std::fs::canonicalize(&dev)?;
+            let x = ms.iter().filter(|x| path.starts_with(&x.point)).max_by_key(|x| x.point.len()).ok_or_else(|| io::Error::other(format!("no mount holds swap {dev}")))?;
+            system_disks(x, &ms, 0)
+        } else {
+            disks_of_block((libc::major(md.rdev()) as u64, libc::minor(md.rdev()) as u64))
+        };
+        for d in disks.map_err(|e| io::Error::other(format!("cannot map swap {dev} to a disk: {e}")))? {
             m.entry(d).or_insert_with(|| "holds swap".to_string());
         }
     }
@@ -473,8 +495,10 @@ fn disk_info(name: &str, ms: &[Mount]) -> Option<DiskInfo> {
     d.placeholder_serial = super::suspicious_serial(&d);
     let parts = partitions(name);
     d.volumes = parts.iter().map(|pt| volume(name, pt, ms)).collect();
-    // A file system straight on the disk (no partition table).
-    if parts.is_empty() && (u.contains_key("ID_FS_TYPE") || ms.iter().any(|m| m.source == d.path) || sniff_fs(&d.path).is_some()) {
+    // A file system straight on the disk: no partition table, or a hybrid ISO
+    // mounted whole although it also carries partitions.
+    let whole_mounted = ms.iter().any(|m| m.source == d.path);
+    if whole_mounted || (parts.is_empty() && (u.contains_key("ID_FS_TYPE") || sniff_fs(&d.path).is_some())) {
         d.volumes.push(volume(name, name, ms));
     }
     Some(d)
@@ -760,8 +784,38 @@ pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str
         "ntfs" => vec!["-f", "-L", label, &part],
         _ => vec!["-F", "-L", label, &part],
     };
-    log += &run(mkfs, &args, None)?;
+    // Without udev (mdev on diskless Alpine) the partition node can vanish after it
+    // first appeared: mdev handles the old "remove" event after devtmpfs made the
+    // new node. Recreate it from sysfs and retry.
+    for tries in 1.. {
+        ensure_node(&part);
+        match run(mkfs, &args, None) {
+            Err(e) if (e.contains("No such file or directory") || e.contains("does not exist")) && tries < 10 => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                same_disk(disk)?;
+            }
+            r => {
+                log += &r?;
+                break;
+            }
+        }
+    }
+    // mdev can delete the node again once mkfs is done: leave one to mount.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    ensure_node(&part);
     Ok(log)
+}
+
+/// Create a missing partition node from its sysfs device number.
+fn ensure_node(part: &str) {
+    if Path::new(part).exists() {
+        return;
+    }
+    let dev = read(format!("/sys/class/block/{}/dev", part.trim_start_matches("/dev/")));
+    let Some((Ok(a), Ok(b))) = dev.split_once(':').map(|(a, b)| (a.parse::<u32>(), b.parse::<u32>())) else { return };
+    if let Ok(p) = std::ffi::CString::new(part) {
+        unsafe { libc::mknod(p.as_ptr(), libc::S_IFBLK | 0o660, libc::makedev(a, b)) };
+    }
 }
 
 /// No-op on Linux: servers don't suspend, and inhibiting needs a session bus.

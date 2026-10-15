@@ -161,7 +161,7 @@ fn protected(ms: &[Mount]) -> io::Result<BTreeMap<String, String>> {
     out.insert(d, "system disk (holds /boot)".to_string());
     // The swap file is on the boot volume unless VirtualMemory moved it. The kernel
     // finds that volume by device and, if the device changed, by name: protect both.
-    if let Ok(s) = std::fs::read_to_string(VM_SETTINGS) {
+    if let Some(s) = swap_settings(std::fs::read_to_string(VM_SETTINGS))? {
         let get = |k: &str| s.lines().find_map(|l| l.trim().strip_prefix(k).map(|v| v.trim().trim_matches('"').to_string())).filter(|v| !v.is_empty());
         let mut devs: Vec<String> = get("swap_volume_device").into_iter().collect();
         if let Some(name) = get("swap_volume_name") {
@@ -173,6 +173,14 @@ fn protected(ms: &[Mount]) -> io::Result<BTreeMap<String, String>> {
         }
     }
     Ok(out)
+}
+
+fn swap_settings(result: io::Result<String>) -> io::Result<Option<String>> {
+    match result {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(other(format!("cannot read swap settings: {e}"))),
+    }
 }
 
 /// One USB device from `listusb -v`.
@@ -612,6 +620,15 @@ pub fn nvme(_d: &DiskInfo, _op: u8, _nsid: u32, _cdw10: u32, _len: usize) -> io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_missing_swap_settings_use_the_default_volume() {
+        assert!(swap_settings(Err(io::ErrorKind::NotFound.into())).unwrap().is_none());
+        assert_eq!(swap_settings(Ok("swap_volume_device /dev/disk/ata/1/0/raw".into())).unwrap().as_deref(), Some("swap_volume_device /dev/disk/ata/1/0/raw"));
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidData, io::ErrorKind::Other] {
+            assert!(swap_settings(Err(kind.into())).is_err());
+        }
+    }
 
     #[test]
     fn listusb_storage_devices() {

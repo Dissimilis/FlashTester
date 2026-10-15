@@ -57,7 +57,7 @@ struct Mesh {
 }
 
 fn xml_text(s: &str) -> String {
-    s.trim().replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
 impl Mesh {
@@ -85,7 +85,8 @@ impl Mesh {
                 stack.pop();
                 let parent = stack.last().map_or("", String::as_str);
                 let grand = if stack.len() >= 2 { stack[stack.len() - 2].as_str() } else { "" };
-                let t = xml_text(text);
+                // A vnode backing filename can contain leading/trailing whitespace.
+                let t = xml_text(if (grand, parent, name) == ("provider", "config", "file") { text } else { text.trim() });
                 match (grand, parent, name) {
                     (_, "class", "name") => class = t,
                     (_, "provider", f) if !prov.is_empty() => {
@@ -200,18 +201,28 @@ impl Mesh {
 
 /// What a memory disk sits on: a file (vnode) on some disk, or memory.
 fn md_disks(mesh: &Mesh, name: &str, depth: u32) -> io::Result<Vec<String>> {
-    let list = output("mdconfig", &["-l", "-v"]).ok_or_else(|| other(format!("{name}: cannot list memory disks (mdconfig)")))?;
-    // "md0  vnode  64M  /tmp/file  ..." (name, type, size, file)
-    let f: Vec<&str> = list.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).find(|f| f.first() == Some(&name)).unwrap_or_default();
-    match f.get(1).copied() {
-        Some("vnode") => {
-            let file = f.get(3).copied().unwrap_or("");
+    let (kind, file) = md_backing(mesh, name)?;
+    match kind {
+        "vnode" => {
             let m = mount_of(Path::new(file)).map_err(|e| other(format!("{name}: its file {file}: {e}")))?;
             disks_of_mount(mesh, &m, depth + 1)
         }
-        Some("malloc" | "swap" | "null" | "preload") => Ok(vec![]),
+        "malloc" | "swap" | "null" | "preload" => Ok(vec![]),
         _ => Err(other(format!("{name}: unknown memory disk"))),
     }
+}
+
+/// mdconfig itself gets these fields from GEOM. Use them directly so filename
+/// spaces, quotes and tabs cannot be mistaken for command-output separators.
+fn md_backing<'a>(mesh: &'a Mesh, name: &str) -> io::Result<(&'a str, &'a str)> {
+    let id = mesh.id(name).ok_or_else(|| other(format!("{name}: unknown memory disk")))?;
+    let p = &mesh.provs[id];
+    let kind = p.cfg.get("type").map(String::as_str).ok_or_else(|| other(format!("{name}: unknown memory disk type")))?;
+    let file = p.cfg.get("file").map_or("", String::as_str);
+    if kind == "vnode" && !Path::new(file).is_absolute() {
+        return Err(other(format!("{name}: missing or invalid backing file")));
+    }
+    Ok((kind, file))
 }
 
 /// The disks of a ZFS pool, from `zpool list -vHP` (device paths of its vdevs).
@@ -334,13 +345,26 @@ fn protected(mesh: &Mesh, ms: &[Mount]) -> io::Result<BTreeMap<String, String>> 
             }
         }
     }
-    let dump = output("sysctl", &["-n", "kern.shutdown.dumpdevname"]).unwrap_or_default();
+    let dump = output("sysctl", &["-n", "kern.shutdown.dumpdevname"]).ok_or_else(|| other("cannot query crash dump devices (sysctl kern.shutdown.dumpdevname)"))?;
+    for d in dump_disks(mesh, &dump)? {
+        out.entry(d).or_insert_with(|| "crash dump device".to_string());
+    }
+    Ok(out)
+}
+
+fn dump_disks(mesh: &Mesh, dump: &str) -> io::Result<Vec<String>> {
     let dump = dump.trim();
-    if !dump.is_empty() {
-        let id = mesh.id(dump).ok_or_else(|| other(format!("crash dump device {dump} is not in GEOM")))?;
-        for d in mesh.disks(id, 0).map_err(|e| other(format!("cannot map the crash dump device to a disk: {e}")))? {
-            out.entry(d).or_insert_with(|| "crash dump device".to_string());
+    let mut out = vec![];
+    if dump.is_empty() {
+        return Ok(out);
+    }
+    // The kernel joins configured device names with commas; no devices is empty.
+    for name in dump.split(',') {
+        if name.is_empty() {
+            return Err(other("empty name in crash dump device list"));
         }
+        let id = mesh.id(name).ok_or_else(|| other(format!("crash dump device {name} is not in GEOM")))?;
+        out.extend(mesh.disks(id, 0).map_err(|e| other(format!("cannot map crash dump device {name} to a disk: {e}")))?);
     }
     Ok(out)
 }
@@ -403,13 +427,24 @@ fn usb_info(umass: &str) -> Option<UsbInfo> {
         "SUPER_PLUS" => "USB 3.x SuperSpeed+ (10 Gbit/s)",
         s => s,
     };
-    let bcd = output("usbconfig", &["-d", &ugen, "dump_device_desc"]).unwrap_or_default();
-    let bcd = bcd.lines().find_map(|l| l.trim().strip_prefix("bcdUSB = 0x")).map(|h| h.split_whitespace().next().unwrap_or("").to_string()).unwrap_or_default();
+    let desc = output("usbconfig", &["-d", &ugen, "dump_device_desc"]).unwrap_or_default();
+    let field = |k: &str| desc.lines().find_map(|l| l.trim().strip_prefix(k)).map(|h| h.split_whitespace().next().unwrap_or("").to_string()).unwrap_or_default();
+    let bcd = field("bcdUSB = 0x");
+    // "iManufacturer = 0x0001  <SMI Corporation>"
+    let string = |k: &str| desc.lines().find_map(|l| l.trim().strip_prefix(k)).and_then(|r| Some(r.split_once('<')?.1.trim_end().trim_end_matches('>').trim().to_string())).filter(|s| s != "no string").unwrap_or_default();
+    // "bMaxPower = 0x00fa": units of 2 mA, 8 mA at SuperSpeed.
+    let cfg = output("usbconfig", &["-d", &ugen, "dump_curr_config_desc"]).unwrap_or_default();
+    let power = cfg.lines().find_map(|l| l.trim().strip_prefix("bMaxPower = 0x")).and_then(|h| u32::from_str_radix(h.split_whitespace().next()?, 16).ok()).unwrap_or(0);
+    let unit = if spd.starts_with("SUPER") { 8 } else { 2 };
     let hex = |k: &str| pnp.get(k).map(|v| v.trim_start_matches("0x").to_ascii_uppercase()).unwrap_or_default();
     Some(UsbInfo {
         vid: hex("vendor"),
         pid: hex("product"),
-        usb_version: if bcd.len() == 4 { format!("{}.{}", bcd[..2].trim_start_matches('0'), &bcd[2..]) } else { bcd },
+        usb_version: super::bcd(&bcd),
+        release: super::bcd(&field("bcdDevice = 0x")),
+        manufacturer: string("iManufacturer = 0x"),
+        product: string("iProduct = 0x"),
+        max_power_ma: power * unit,
         link: link.to_string(),
         superspeed_capable: None,
         superspeed_plus_capable: None,
@@ -417,6 +452,7 @@ fn usb_info(umass: &str) -> Option<UsbInfo> {
         slow_link: matches!(spd, "LOW" | "FULL" | "HIGH"),
         hub: ugen,
         port: loc.get("port").and_then(|p| p.parse().ok()).unwrap_or(0),
+        ..Default::default()
     })
 }
 
@@ -516,6 +552,20 @@ fn disk_info(mesh: &Mesh, id: &str, cams: &HashMap<String, Cam>, ms: &[Mount], c
             }
         }
         d.removable = output("camcontrol", &["inquiry", &name, "-D"]).is_some_and(|s| s.contains("Removable"));
+        d.controller = d.usb.as_ref().map(|u| crate::ids::usb_controller_hint(&u.vid, &u.pid)).unwrap_or_default();
+    }
+    if d.bus == "NVMe" {
+        // nda sits on the CAM sim "nvme0"; nvd's newbus parent is the nvme device.
+        let ctrl = c.map(|c| c.sim.clone()).filter(|s| s.starts_with("nvme")).or_else(|| {
+            let unit = name.strip_prefix("nvd")?;
+            output("sysctl", &["-n", &format!("dev.nvd.{unit}.%parent")])
+        });
+        if let Some(unit) = ctrl.as_deref().and_then(|c| c.trim().strip_prefix("nvme")) {
+            let pnp = pairs(&output("sysctl", &["-n", &format!("dev.nvme.{unit}.%pnpinfo")]).unwrap_or_default());
+            if let (Some(v), Some(dv)) = (pnp.get("vendor"), pnp.get("device")) {
+                d.controller = crate::ids::nvme_controller(v, dv);
+            }
+        }
     }
     d.placeholder_serial = super::suspicious_serial(&d);
     let parts = partitions(mesh, id);
@@ -627,10 +677,13 @@ pub struct RawDisk {
     pub size: u64,
     pub sector: u32,
     pub id: String,
+    writable: bool,
 }
 
 impl RawDisk {
     pub fn open(d: &DiskInfo, write: bool) -> io::Result<RawDisk> {
+        let current = disk(&d.id)?;
+        d.check_identity(&current).map_err(io::Error::other)?;
         if write {
             let mounted: Vec<String> = disk(&d.id)?.volumes.iter().flat_map(|v| v.mount_points.iter().map(move |m| format!("{} on {m}", v.guid))).collect();
             if !mounted.is_empty() {
@@ -646,7 +699,7 @@ impl RawDisk {
         if unsafe { libc::ioctl(f.as_raw_fd(), DIOCGMEDIASIZE, &mut size) } != 0 || size <= 0 {
             size = d.size as libc::off_t;
         }
-        Ok(RawDisk { file: f, size: size as u64, sector: d.sector_size.max(512), id: d.id.clone() })
+        Ok(RawDisk { file: f, size: size as u64, sector: d.sector_size.max(512), id: d.id.clone(), writable: write })
     }
 }
 
@@ -655,6 +708,9 @@ impl Dev for RawDisk {
         self.size
     }
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+        if !self.writable {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
+        }
         let mut done = 0;
         while done < buf.len() {
             done += pwrite(&self.file, &buf[done..], off + done as u64)?;
@@ -674,7 +730,7 @@ impl Dev for RawDisk {
         Ok(done)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        if self.writable { self.file.sync_all() } else { Ok(()) }
     }
     fn align(&self) -> usize {
         (self.sector as usize).max(ALIGN)
@@ -887,6 +943,28 @@ pub fn nvme(d: &DiskInfo, op: u8, nsid: u32, cdw10: u32, len: usize) -> io::Resu
 mod tests {
     use super::*;
 
+    #[test]
+    fn memory_disk_paths_preserve_spaces_and_literal_quotes() {
+        let mesh = Mesh::parse("<mesh><class><name>MD</name><geom id=\"g\"><provider id=\"p\"><name>md0</name><config><type>vnode</type><file>/var/images/my &quot;quoted&quot; &amp; disk\twith newline\n.img </file></config></provider></geom></class></mesh>");
+        assert_eq!(md_backing(&mesh, "md0").unwrap(), ("vnode", "/var/images/my \"quoted\" & disk\twith newline\n.img "));
+        assert!(md_backing(&mesh, "md1").is_err());
+    }
+
+    #[test]
+    fn incomplete_memory_disk_config_is_refused() {
+        for config in [
+            "<type>vnode</type>",
+            "<type>vnode</type><file></file>",
+            "<type>vnode</type><file>relative.img</file>",
+            "<file>/var/image</file>",
+        ] {
+            let mesh = Mesh::parse(&format!("<mesh><class><name>MD</name><geom id=\"g\"><provider id=\"p\"><name>md0</name><config>{config}</config></provider></geom></class></mesh>"));
+            assert!(md_backing(&mesh, "md0").is_err(), "accepted {config:?}");
+        }
+        let mesh = Mesh::parse("<mesh><class><name>MD</name><geom id=\"g\"><provider id=\"p\"><name>md0</name><config><type>swap</type></config></provider></geom></class></mesh>");
+        assert_eq!(md_backing(&mesh, "md0").unwrap(), ("swap", ""));
+    }
+
     const XML: &str = r#"<mesh>
   <class id="0x1"><name>DISK</name>
     <geom id="0x10"><class ref="0x1"/><name>da0</name><rank>1</rank><config></config>
@@ -942,6 +1020,18 @@ mod tests {
         let swap: Vec<_> = m.geoms.values().filter(|g| g.class == "SWAP").flat_map(|g| g.consumes.clone()).collect();
         assert_eq!(m.disks(&swap[0], 0).unwrap(), vec!["da0".to_string()]);
         assert!(m.disks(m.id("lost.eli").unwrap(), 0).is_err());
+    }
+
+    #[test]
+    fn dump_devices_cover_every_backing_disk_or_fail_closed() {
+        let xml = XML.replace("</mesh>", "<class><name>DISK</name><geom id=\"g1\"><provider id=\"p1\"><name>da1</name></provider></geom></class></mesh>");
+        let mesh = Mesh::parse(&xml);
+        assert!(dump_disks(&mesh, "\n").unwrap().is_empty());
+        assert_eq!(dump_disks(&mesh, "gpt/rootfs\n").unwrap(), vec!["da0"]);
+        assert_eq!(dump_disks(&mesh, "gpt/rootfs,da1\n").unwrap(), vec!["da0", "da1"]);
+        for dump in ["missing", "da1,missing", "da1,", ",da1", "da1,,gpt/rootfs", "none", "lost.eli"] {
+            assert!(dump_disks(&mesh, dump).is_err(), "accepted {dump:?}");
+        }
     }
 
     #[test]

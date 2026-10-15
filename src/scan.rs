@@ -11,6 +11,9 @@ use std::time::Instant;
 pub struct ScanResult {
     pub stats: IoStats,
     pub size: u64,
+    /// End of the fully scanned region, including unreadable areas.
+    #[serde(default)]
+    pub scanned: u64,
     /// Bytes in blocks that could not be read.
     pub bad_bytes: u64,
     pub unit: u64,
@@ -45,6 +48,9 @@ impl ScanResult {
         if self.stop == Stop::Disconnected {
             v.push("The drive disconnected during the scan.".into());
         }
+        if self.events.iter().any(|e| e.kind == "io-error") {
+            v.push("Some reads failed and were retried in smaller blocks. The original errors remain part of this result.".into());
+        }
         v
     }
 }
@@ -52,13 +58,18 @@ impl ScanResult {
 pub fn run_scan(dev: &mut dyn Dev, limit: Option<u64>, block: usize, ctx: &Ctx) -> ScanResult {
     let len = limit.unwrap_or(u64::MAX).min(dev.len()) / 4096 * 4096;
     let unit = dev.align() as u64;
-    let mut r = ScanResult { stats: IoStats::default(), size: len, bad_bytes: 0, unit, bad_ranges: vec![], slow: vec![], stop: Stop::Done, events: vec![] };
+    let mut r = ScanResult { stats: IoStats::default(), size: len, scanned: 0, bad_bytes: 0, unit, bad_ranges: vec![], slow: vec![], stop: Stop::Done, events: vec![] };
+    if len == 0 {
+        r.stop = Stop::Error("The scan size is smaller than one 4096-byte block.".into());
+        return r;
+    }
     let mut buf = AlignedBuf::new(block);
     let mut small = AlignedBuf::new(unit as usize);
     let mut off = 0u64;
     ctx.phase("Scanning (read-only)", len);
     let bad = |r: &mut ScanResult, o: u64, n: u64| {
         r.bad_bytes += n;
+        ctx.mark(o, o + n, "unreadable");
         if let Some(last) = r.bad_ranges.last_mut().filter(|l| l.end == o) {
             last.end += n;
         } else if r.bad_ranges.len() < 1000 {
@@ -82,41 +93,55 @@ pub fn run_scan(dev: &mut dyn Dev, limit: Option<u64>, block: usize, ctx: &Ctx) 
                 ctx.sample(off, got as f64 / 1e6 / secs.max(1e-9));
             }
             Err(e) if is_disconnect(&e) => {
+                r.stats.record(off, 0, t.elapsed().as_secs_f64());
                 r.events.push(Event::new(off, n as u64, "disconnect", e.to_string()));
                 r.stop = Stop::Disconnected;
                 break;
             }
             Err(e) => {
                 // Find the bad blocks inside this chunk.
+                r.stats.record(off, 0, t.elapsed().as_secs_f64());
                 r.events.push(Event::new(off, n as u64, "io-error", e.to_string()));
                 ctx.log(format!("Read error at {}: {e}; locating bad blocks", size(off)));
-                let mut run = 0;
                 let mut o = off;
                 while o < off + n as u64 {
-                    if run >= 64 {
-                        // A long bad stretch: skip the rest of the chunk.
-                        bad(&mut r, o, off + n as u64 - o);
+                    if ctx.cancelled() {
+                        r.stop = Stop::Cancelled;
                         break;
                     }
-                    match dev.read_at(o, &mut small) {
-                        Ok(_) => run = 0,
+                    let count = unit.min(off + n as u64 - o) as usize;
+                    let t = Instant::now();
+                    match dev.read_at(o, &mut small[..count]) {
+                        Ok(got) => {
+                            let secs = t.elapsed().as_secs_f64();
+                            r.stats.record(o, got, secs);
+                            ctx.sample(o, got as f64 / 1e6 / secs.max(1e-9));
+                            if got < count {
+                                bad(&mut r, o + got as u64, (count - got) as u64);
+                            }
+                        }
                         Err(e) if is_disconnect(&e) => {
+                            r.stats.record(o, 0, t.elapsed().as_secs_f64());
+                            r.events.push(Event::new(o, count as u64, "disconnect", e.to_string()));
                             r.stop = Stop::Disconnected;
                             break;
                         }
                         Err(_) => {
-                            run += 1;
-                            bad(&mut r, o, unit);
+                            r.stats.record(o, 0, t.elapsed().as_secs_f64());
+                            bad(&mut r, o, count as u64);
                         }
                     }
-                    o += unit;
+                    o += count as u64;
+                    r.scanned = o;
+                    ctx.progress(o);
                 }
-                if r.stop == Stop::Disconnected {
+                if matches!(r.stop, Stop::Disconnected | Stop::Cancelled) {
                     break;
                 }
             }
         }
         off += n as u64;
+        r.scanned = off;
         ctx.progress(off);
     }
     r.stats.finish(200);

@@ -41,11 +41,34 @@ pub fn direct(o: &mut OpenOptions, write_through: bool) -> &mut OpenOptions {
     }
 }
 
+/// Independent I/O handle for the already-open object; never resolve its path again.
+pub fn io_handle(file: &File, write: bool) -> io::Result<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use windows_sys::Win32::{Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE}, Storage::FileSystem::{ReOpenFile, FILE_SHARE_READ, FILE_SHARE_WRITE}};
+        // Duplicating a synchronous Windows handle would serialize QD32 workers.
+        let access = GENERIC_READ | if write { GENERIC_WRITE } else { 0 };
+        let h = unsafe { ReOpenFile(file.as_raw_handle(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH) };
+        if h == INVALID_HANDLE_VALUE { return Err(io::Error::last_os_error()); }
+        Ok(unsafe { File::from_raw_handle(h) })
+    }
+    #[cfg(unix)]
+    {
+        let _ = write;
+        file.try_clone()
+    }
+}
+
 /// Refuse a path that is a link (symlink, junction or other reparse point). Test files
 /// live on the drive under test; a crafted drive could otherwise point one at the
 /// system disk, and writing or cleaning would follow it.
 pub fn no_link(p: &Path) -> io::Result<()> {
-    let Ok(m) = std::fs::symlink_metadata(p) else { return Ok(()) };
+    let m = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
     #[cfg(windows)]
     let link = m.file_type().is_symlink() || std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0;
     #[cfg(unix)]

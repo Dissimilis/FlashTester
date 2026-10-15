@@ -11,20 +11,20 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "flashtester", version, about = "Test flash drives (and other disks) for fake capacity, data loss and speed.", after_help = AFTER)]
+#[command(name = "flashtester", version, about = "Check drive capacity, test for data loss, and measure speed.", after_help = AFTER)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
     /// Print the result as JSON on stdout (progress still goes to stderr).
     #[arg(long, global = true)]
     json: bool,
-    /// Also save the result: .json for JSON, anything else for an HTML report.
+    /// Save the result as JSON (.json) or HTML (any other extension).
     #[arg(long, global = true, value_name = "FILE")]
     report: Option<PathBuf>,
-    /// Also save a one-page HTML evidence sheet (for a refund claim).
+    /// Save a one-page HTML summary of the evidence.
     #[arg(long, global = true, value_name = "FILE")]
     evidence: Option<PathBuf>,
-    /// No progress output.
+    /// Hide progress output. Action prompts are still shown.
     #[arg(long, short, global = true)]
     quiet: bool,
 }
@@ -32,8 +32,9 @@ struct Cli {
 macro_rules! after {
     ($gui:expr) => {
         concat!(
-            "Targets: a drive letter or folder (file mode, non-destructive, e.g. E:) or --disk N (raw mode, whole disk).
-The disk the running OS boots from can never be tested. Raw-mode writes need --destroy and an elevated terminal.
+            "Targets: a drive letter or folder (file mode, e.g. E:) or --disk N (raw mode, whole disk).
+File mode writes test files into free space. On a fake drive, these writes can overwrite existing files. Back up the drive first.
+System disks allow info, scan and read-only bench --disk. Writes and file-mode tests are blocked. Raw-mode writes erase data and require --destroy and administrator or root access.
 Sizes: 500M, 8G, 1T (decimal) or 8GiB (binary), or plain bytes.
 Exit codes: 0 OK, 1 problem found (fake/defective/read-only/unreliable), 2 refused, 3 error, 130 cancelled.",
             $gui
@@ -76,7 +77,27 @@ enum Cmd {
     Info(TargetArg),
     /// Show the drive's own SMART counters (read-only; works on the system disk too).
     Smart(TargetArg),
-    /// Full test: fill with a seeded pattern, then read everything back (h2testw-style).
+    /// Look up four or six NAND ID bytes offline; returns all matching parts.
+    FlashId { id: String },
+    /// List the recovered layouts supported by offline identity decoding.
+    FlashLayouts,
+    /// Decode a saved binary reply offline. Does not query or open a drive.
+    #[command(group(clap::ArgGroup::new("layout").required(true).args(["nand_layout", "identity_layout", "smi_model"])))]
+    DecodeFlash {
+        input: PathBuf,
+        #[arg(long, value_enum)]
+        nand_layout: Option<crate::flash::Family>,
+        /// Layout ID from flash-layouts, e.g. 0x463c20 for Phison.
+        #[arg(long)]
+        identity_layout: Option<String>,
+        /// Decode an SMI model discovery reply (SM3 marker).
+        #[arg(long)]
+        smi_model: bool,
+        /// Compare to a saved `info --json` file; only for identity replies.
+        #[arg(long, requires = "identity_layout", conflicts_with_all = ["nand_layout", "smi_model"])]
+        device_info: Option<PathBuf>,
+    },
+    /// Write test data, then read it back and check for errors.
     Test {
         #[command(flatten)]
         t: TargetArg,
@@ -86,7 +107,7 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         passes: u32,
     },
-    /// Endurance: repeat write+verify with a new seed each pass.
+    /// Repeat the write and read-back test with new data each pass.
     Endurance {
         #[command(flatten)]
         t: TargetArg,
@@ -110,8 +131,8 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         loops: u32,
     },
-    /// Quick fake-capacity probe: minutes instead of hours.
-    /// With --disk: raw, destructive. With a drive letter: inside free space (admin).
+    /// Check for false capacity by testing sampled positions across the drive.
+    /// With --disk, writes erase data. With a volume, writes use free space but can overwrite files on a fake drive. Requires administrator or root access.
     Probe {
         #[command(flatten)]
         t: TargetArg,
@@ -153,7 +174,7 @@ enum Cmd {
         #[arg(long)]
         destroy: bool,
     },
-    /// Many small files: create, rename, delete, verify (file-system integrity, files/s).
+    /// Create, rename and delete small files, then check their contents and measure speed.
     SmallFiles {
         path: String,
         #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(10..))]
@@ -162,14 +183,14 @@ enum Cmd {
         #[arg(long)]
         keep: bool,
     },
-    /// Guided test: pull the drive out while it writes, then check flushed data survived.
+    /// Unplug the drive during a write, then check the data confirmed as saved.
     PlugPull {
         path: String,
         /// Flush interval.
         #[arg(long, default_value = "256M")]
         checkpoint: String,
     },
-    /// Repartition and format a drive, to its real capacity if it is fake.
+    /// Erase and format a drive, using its estimated usable capacity if it is fake.
     Fix {
         #[arg(long)]
         disk: String,
@@ -208,7 +229,7 @@ struct TestArgs {
     /// Don't re-read earlier data while writing (no early abort on fakes).
     #[arg(long)]
     no_early_abort: bool,
-    /// Ask to unplug and replug the drive between writing and verifying.
+    /// Ask to disconnect and reconnect the drive before checking the written data.
     #[arg(long)]
     replug: bool,
     /// Continue with further passes after errors.
@@ -243,7 +264,11 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         }
     };
     let v: f64 = num.parse().map_err(|_| format!("bad size {s}"))?;
-    Ok((v * mul as f64) as u64)
+    let bytes = v * mul as f64;
+    if !bytes.is_finite() || bytes < 1.0 || bytes >= u64::MAX as f64 {
+        return Err(format!("size must be at least one byte and fit in 64 bits: {s}"));
+    }
+    Ok(bytes as u64)
 }
 
 fn target(t: &TargetArg) -> Result<Where, String> {
@@ -332,7 +357,7 @@ fn list(json: bool) -> i32 {
         return 0;
     }
     if !platform::is_admin() {
-        println!("(not elevated: raw-disk commands need an administrator terminal)\n");
+        println!("(Whole-disk commands require administrator or root access.)\n");
     }
     let w = disks.iter().map(|d| d.id.len()).max().unwrap_or(0).max(8);
     println!("{:<w$} {:<10} {:<6} {:<28} {:<34} {:<12} Status", "Disk", "Size", "Bus", "Name", "Link", "Volumes");
@@ -430,21 +455,28 @@ fn info(t: &TargetArg, json: bool) -> i32 {
         return 0;
     }
     println!("Disk {}: {} ({})", d.id, d.name(), d.path);
-    println!("  Vendor / product / rev: {} / {} / {}", d.vendor, d.product, d.revision);
+    println!("  Vendor / product / revision: {} / {} / {}", d.vendor, d.product, d.revision);
     println!("  Serial:   {}", if d.serial.is_empty() { "(none)" } else { &d.serial });
-    println!("  Capacity: {} ({} bytes, {}-byte sectors)", size(d.size), d.size, d.sector_size);
+    println!("  Reported capacity: {} ({} bytes, {}-byte sectors)", size(d.size), d.size, d.sector_size);
     println!("  Bus:      {}{}", d.bus, if d.removable { ", removable" } else { "" });
     if let Some(u) = &d.usb {
-        println!("  USB:      VID {} PID {}, device reports USB {}", u.vid, u.pid, u.usb_version);
+        println!("  USB:      {}, device reports USB {}", u.id_text(), u.usb_version);
         let note = if u.slow_link && u.superspeed_capable == Some(true) {
-            "  <- USB 3 drive running at USB 2 speed"
+            " (USB 3 capable; connected at USB 2 speed)"
         } else if u.superspeed_plus_capable == Some(true) && !u.link.contains("SuperSpeed+") {
-            "  <- 10 Gbit/s drive running at 5 Gbit/s"
+            " (10 Gbit/s capable; connected at 5 Gbit/s)"
         } else {
             ""
         };
         println!("  Link:     {}{note}", if u.link.is_empty() { "(unknown)" } else { &u.link });
+        println!("  USB device: {}", u.device_text());
         println!("  USB serial: {}", u.serial.as_deref().unwrap_or("(none)"));
+    }
+    if !d.controller.is_empty() {
+        println!("  Controller: {}", d.controller);
+    }
+    if let Some(c) = &d.card {
+        println!("  Card:     {}, serial {}", c.text(), c.serial);
     }
     println!("  Device:   {}", d.instance_id);
     for v in &d.volumes {
@@ -457,16 +489,17 @@ fn info(t: &TargetArg, json: bool) -> i32 {
         println!("  Volume:   {place} {} \"{}\" {} ({free})", v.fs, v.label, size(v.size));
     }
     if let Some(p) = &d.placeholder_serial {
-        println!("  ! Suspicious identity: {p}");
+        println!("  ! Check the serial number: {p}");
     }
     match &d.protected {
-        Some(p) => println!("  PROTECTED: {p} - cannot be tested."),
+        Some(p) => println!("  READ ONLY: {p}. Identification, read scan and read speed are available; writes and file tests are blocked."),
         None => println!("  Can be tested."),
     }
     0
 }
 
 fn emit(rep: &Report, cli: &Cli) -> i32 {
+    let mut save_failed = false;
     if cli.json {
         println!("{}", serde_json::to_string_pretty(rep).unwrap());
     } else {
@@ -477,16 +510,16 @@ fn emit(rep: &Report, cli: &Cli) -> i32 {
         let body = if is_json { serde_json::to_string_pretty(rep).unwrap() } else { rep.html() };
         match std::fs::write(p, body) {
             Ok(()) => eprintln!("Report saved to {}", p.display()),
-            Err(e) => eprintln!("Cannot save report {}: {e}", p.display()),
+            Err(e) => { eprintln!("Cannot save report {}: {e}", p.display()); save_failed = true; }
         }
     }
     if let Some(p) = &cli.evidence {
         match std::fs::write(p, rep.evidence_html()) {
             Ok(()) => eprintln!("Evidence sheet saved to {}", p.display()),
-            Err(e) => eprintln!("Cannot save evidence {}: {e}", p.display()),
+            Err(e) => { eprintln!("Cannot save evidence {}: {e}", p.display()); save_failed = true; }
         }
     }
-    rep.exit_code()
+    if save_failed { 3 } else { rep.exit_code() }
 }
 
 fn need_destroy(destroy: bool, w: &Where) -> Result<(), String> {
@@ -516,7 +549,7 @@ fn build_job(cmd: &Cmd) -> Result<Job, String> {
             need_destroy(*destroy, &w)?;
             Job::Probe { w }
         }
-        Cmd::Scan { disk, size } => Job::Scan { w: app::resolve_disk(disk)?, size: size.as_deref().map(parse_size).transpose()? },
+        Cmd::Scan { disk, size } => Job::Scan { w: app::resolve_read_disk(disk)?, size: size.as_deref().map(parse_size).transpose()? },
         Cmd::Iops { t, seconds, write, destroy } => {
             let w = target(t)?;
             if *write {
@@ -525,7 +558,10 @@ fn build_job(cmd: &Cmd) -> Result<Job, String> {
             Job::Iops { w, secs: *seconds, write: *write }
         }
         Cmd::Bench { t, size, write, destroy } => {
-            let w = target(t)?;
+            let w = match (&t.path, &t.disk, write) {
+                (None, Some(n), false) => app::resolve_read_disk(n)?,
+                _ => target(t)?,
+            };
             if *write {
                 need_destroy(*destroy, &w)?;
             }
@@ -570,6 +606,47 @@ pub fn main() -> i32 {
         Cmd::List => return list(cli.json),
         Cmd::Info(t) => return info(t, cli.json),
         Cmd::Smart(t) => return smart(t, cli.json),
+        Cmd::FlashId { id } => {
+            return match crate::flash::parse_id(id).and_then(|id| crate::flash::lookup(&id)) {
+                Ok(nand) => {
+                    let mut result = crate::flash::Identification::new("user_supplied_nand_id", None);
+                    result.nand = Some(nand);
+                    emit(&crate::flash::report(result), &cli)
+                },
+                Err(e) => {
+                    let mut report = refuse(e);
+                    report.command = "identify".into();
+                    emit(&report, &cli)
+                },
+            };
+        },
+        Cmd::FlashLayouts => {
+            let rows: Vec<_> = crate::flash::profiles().iter().map(|p| serde_json::json!({"layout": p.key, "family": p.family})).collect();
+            if cli.json { println!("{}", serde_json::to_string_pretty(&rows).unwrap()); }
+            else { for p in crate::flash::profiles() { println!("{}  {}", p.key, p.family); } }
+            return 0;
+        },
+        Cmd::DecodeFlash { input, nand_layout, identity_layout, smi_model, device_info } => {
+            let decode = || -> Result<crate::flash::Identification, String> {
+                let bytes = crate::flash::read_capture(input)?;
+                if let Some(family) = nand_layout { return Ok(crate::flash::decode_nand(*family, bytes)); }
+                if *smi_model { return Ok(crate::flash::decode_smi_model(bytes)); }
+                let profile = crate::flash::profiles().iter().find(|p| Some(&p.key) == identity_layout.as_ref()).ok_or("Unknown layout; run flash-layouts.")?;
+                let expected: Option<platform::DiskInfo> = device_info.as_ref().map(|p| {
+                    let bytes = crate::flash::read_capture(p)?;
+                    serde_json::from_slice(&bytes).map_err(|e| format!("Invalid device-info JSON: {e}"))
+                }).transpose()?;
+                Ok(crate::flash::decode_identity(profile, bytes, expected.as_ref()))
+            };
+            return match decode() {
+                Ok(result) => emit(&crate::flash::report(result), &cli),
+                Err(e) => {
+                    let mut report = refuse(e);
+                    report.command = "identify".into();
+                    emit(&report, &cli)
+                },
+            };
+        },
         Cmd::Clean { path } => {
             let w = match app::resolve_path(path) {
                 Ok(w) => w,
@@ -642,11 +719,23 @@ mod tests {
     }
 
     #[test]
+    fn offline_decode_requires_one_layout() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["ft", "decode-flash", "reply.bin"]).is_err());
+        assert!(Cli::try_parse_from(["ft", "decode-flash", "reply.bin", "--nand-layout", "phison", "--smi-model"]).is_err());
+        assert!(Cli::try_parse_from(["ft", "decode-flash", "reply.bin", "--nand-layout", "smi-new"]).is_ok());
+        assert!(Cli::try_parse_from(["ft", "decode-flash", "reply.bin", "--device-info", "disk.json", "--smi-model"]).is_err());
+    }
+
+    #[test]
     fn sizes() {
         assert_eq!(parse_size("8G").unwrap(), 8_000_000_000);
         assert_eq!(parse_size("8GiB").unwrap(), 8 << 30);
         assert_eq!(parse_size("1.5MB").unwrap(), 1_500_000);
         assert_eq!(parse_size("4096").unwrap(), 4096);
         assert!(parse_size("3X").is_err());
+        for size in ["0", "-1GiB", "0.1", "18446744073709551616", "999999999999999999999TB"] {
+            assert!(parse_size(size).is_err(), "accepted {size}");
+        }
     }
 }

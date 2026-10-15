@@ -63,15 +63,15 @@ impl ProbeResult {
             self.seconds
         )];
         match self.finding.as_str() {
-            "genuine" => v.push(format!("Every probe kept its data: the capacity is genuine (checked to within {}).", size(self.step))),
+            "genuine" => v.push(format!("All sampled positions retained their data. Sampling interval: {}. Run a full test to check the space between them.", size(self.step))),
             "fake" => {
                 v.push(format!("Only about {} really stores data ({:.1}% of the claimed {}).", size(self.usable), self.usable as f64 * 100.0 / self.claimed.max(1) as f64, size(self.claimed)));
                 if let Some(m) = self.module {
                     v.push(format!("Writes past that point wrap around and overwrite the start of the drive (period {}).", size(m)));
                 }
             }
-            "defective" => v.push(format!("{} of {} probes lost data, scattered across the drive: the flash is defective. First failure at {}.", self.bad, self.positions.len(), size(self.first_bad.unwrap_or(0)))),
-            "read-only" => v.push("No probe kept its data: the drive ignores writes (silently read-only or dead).".into()),
+            "defective" => v.push(format!("{} of {} sampled positions lost data at scattered locations. First failure at {}. The drive or its connection may be faulty.", self.bad, self.positions.len(), size(self.first_bad.unwrap_or(0)))),
+            "read-only" => v.push("No sampled position retained the test data. The drive may be ignoring writes or may be faulty.".into()),
             _ => {}
         }
         for e in self.examples.iter().take(5) {

@@ -585,14 +585,23 @@ pub fn verify_pass(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block:
     });
 
     // Re-read chunks with bad data: same wrong bytes = media, different = unstable reads.
-    if stop != Stop::Disconnected {
-        for (off, n, h0) in suspects {
+    if stop != Stop::Disconnected && stop != Stop::Cancelled {
+        'suspects: for (off, n, h0) in suspects {
+            if ctx.cancelled() {
+                stop = Stop::Cancelled;
+                break;
+            }
             let mut b = AlignedBuf::new(n);
             let mut hashes = vec![];
             let mut err = None;
             for _ in 0..2 {
+                if ctx.cancelled() {
+                    stop = Stop::Cancelled;
+                    break 'suspects;
+                }
                 match dev.read_at(off, &mut b[..n]) {
-                    Ok(_) => hashes.push(hash(&b[..n])),
+                    Ok(got) if got == n => hashes.push(hash(&b[..n])),
+                    Ok(got) => err = Some(format!("short read: {got} of {n} bytes")),
                     Err(e) => err = Some(e.to_string()),
                 }
             }

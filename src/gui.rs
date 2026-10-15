@@ -25,6 +25,7 @@ enum Sel {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
+    Info,
     Test,
     Endurance,
     Verify,
@@ -37,79 +38,149 @@ enum Kind {
     Bench,
 }
 
+#[cfg(test)]
+mod operation_tests {
+    use super::Kind;
+
+    #[test]
+    fn saved_report_buttons_work_with_long_paths_in_narrow_panels() {
+        use super::*;
+        let path = PathBuf::from("C:/Users/A user with a long name/Documents/FlashTester/reports with spaces/ataskaita-ąžuolas-20261015-163400.html");
+        for width in [260.0, 520.0] {
+            let ctx = egui::Context::default();
+            k::style(&ctx);
+            let frame = |events| {
+                let mut action = None;
+                let output = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 500.0))), events, ..Default::default()
+                }, |ui| {
+                    action = saved_report_row(ui, &path);
+                });
+                (output, action)
+            };
+            frame(vec![]);
+            let (output, _) = frame(vec![]);
+            for (label, expected) in [("Open file", path.clone()), ("Open folder", path.parent().unwrap().to_path_buf())] {
+                let rect = output.shapes.iter().find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == label => Some(Rect::from_min_size(t.pos, t.galley.size())),
+                    _ => None,
+                }).expect("saved-report action must be visible");
+                assert!(rect.left() >= 0.0 && rect.right() <= width, "{label} is outside the panel: {rect:?}");
+                let pos = rect.center();
+                frame(vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }]);
+                let (_, action) = frame(vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
+                assert_eq!(action, Some(expected), "{label} must select the right path");
+            }
+        }
+    }
+
+    #[test]
+    fn protected_drive_has_only_details_and_two_read_checks() {
+        let choices = Kind::for_target(true, true);
+        assert!(choices == [Kind::Info, Kind::Bench, Kind::Scan]);
+        assert!(!Kind::Info.needs_admin(true));
+        assert!(choices.iter().all(|k| !k.erases(true)));
+        // A stale volume selection must not reveal file benchmarks.
+        assert!(Kind::for_target(false, true) == choices);
+    }
+
+    #[test]
+    fn disconnected_drive_keeps_its_completed_report() {
+        use super::*;
+        let mut gui = Gui::new();
+        let disk = DiskInfo { id: "removed".into(), instance_id: "original-device".into(), ..Default::default() };
+        gui.sel = Some(Sel::Disk(disk.id.clone()));
+        let mut report = Report::new("scan", Where::Disk(disk).target());
+        report.set(Status::Unreliable, "The drive disconnected during the scan.");
+        gui.result = Some(report);
+        gui.disks = vec![DiskInfo { id: "other".into(), ..Default::default() }];
+        gui.reconcile_selection();
+        assert!(gui.sel == Some(Sel::Disk("removed".into())));
+        assert_eq!(gui.result.as_ref().unwrap().verdict.status, Status::Unreliable);
+        assert_eq!(gui.result.as_ref().unwrap().target.disk.as_ref().unwrap().instance_id, "original-device");
+    }
+}
+
 impl Kind {
     fn name(self) -> &'static str {
         match self {
+            Kind::Info => "Drive details",
             Kind::Test => "Full test",
-            Kind::Endurance => "Endurance",
-            Kind::Verify => "Verify existing data",
-            Kind::Probe => "Quick capacity probe",
-            Kind::Scan => "Surface scan (read-only)",
-            Kind::Iops => "Random 4K speed",
-            Kind::SmallFiles => "Many small files",
+            Kind::Endurance => "Repeated write test",
+            Kind::Verify => "Check saved test data",
+            Kind::Probe => "Quick capacity check",
+            Kind::Scan => "Read scan",
+            Kind::Iops => "Random 4 KiB speed",
+            Kind::SmallFiles => "Small files",
             Kind::PlugPull => "Pull-the-plug test",
-            Kind::Fix => "Fix: repartition to real size",
+            Kind::Fix => "Resize and format",
             Kind::Bench => "Sequential speed",
         }
     }
     fn start_label(self) -> &'static str {
         match self {
+            Kind::Info => "Drive details",
             Kind::Test => "Start full test",
-            Kind::Endurance => "Start endurance test",
-            Kind::Verify => "Start verify",
-            Kind::Probe => "Start probe",
+            Kind::Endurance => "Start repeated test",
+            Kind::Verify => "Check test data",
+            Kind::Probe => "Check capacity",
             Kind::Scan => "Start scan",
-            Kind::Iops => "Start 4K test",
-            Kind::SmallFiles => "Start small-files test",
+            Kind::Iops => "Start random I/O test",
+            Kind::SmallFiles => "Start small file test",
             Kind::PlugPull => "Start pull-the-plug test",
-            Kind::Fix => "Start fix",
+            Kind::Fix => "Resize and format",
             Kind::Bench => "Start speed test",
         }
     }
     fn group(self) -> &'static str {
         match self {
-            Kind::Test | Kind::Probe | Kind::Verify | Kind::Scan => "Capacity & integrity",
+            Kind::Info => "Information",
+            Kind::Scan => "Read checks",
+            Kind::Test | Kind::Probe | Kind::Verify => "Capacity and data loss",
             Kind::Bench | Kind::Iops => "Speed",
-            Kind::Endurance | Kind::SmallFiles | Kind::PlugPull => "Trust",
-            Kind::Fix => "Repair",
+            Kind::Endurance | Kind::SmallFiles | Kind::PlugPull => "Reliability",
+            Kind::Fix => "Formatting",
         }
     }
     fn help(self, raw: bool) -> &'static str {
         match (self, raw) {
-            (Kind::Test, false) => "Fill the free space with a seeded pattern, then read it all back. Stops early if a fake drive starts overwriting itself. Keeps your files.",
-            (Kind::Test, true) => "Write the whole disk with a seeded pattern, then read it all back. DESTROYS all data on the disk.",
-            (Kind::Endurance, _) => "Repeat write + verify with a new seed each pass, until an error or Cancel.",
-            (Kind::Verify, _) => "Read back data written by an earlier test (retention check) without rewriting it.",
-            (Kind::Probe, true) => "Find the real capacity in minutes by writing small blocks across the whole disk. DESTROYS the partition table.",
+            (Kind::Info, _) => "Read the device identity reported by the operating system.",
+            (Kind::Test, false) => "Write test data into free space, then read it back and check for errors. Stops early if later writes overwrite earlier data. A fake drive can also overwrite your files.",
+            (Kind::Test, true) => "Write test data across the whole disk, then read it back and check for errors. Erases all files and partitions.",
+            (Kind::Endurance, _) => "Repeat the write and read-back test with new data each time. Stops at an error, the pass limit, or when you cancel.",
+            (Kind::Verify, _) => "Read and check data saved by an earlier test. Does not write to the drive.",
+            (Kind::Probe, true) => "Check for false capacity by writing small blocks across the disk. Estimates usable space. Erases the partition table and can overwrite files.",
             (Kind::Probe, false) => {
                 if cfg!(windows) {
-                    "Find the real capacity in minutes, writing only inside free space (needs administrator)."
+                    "Check for false capacity using small blocks in free space. Needs administrator rights. On a fake drive, writes can overwrite existing files."
                 } else {
-                    "Find the real capacity in minutes, writing only inside free space (needs root)."
+                    "Check for false capacity using small blocks in free space. Needs root access. On a fake drive, writes can overwrite existing files."
                 }
             }
-            (Kind::Scan, _) => "Read every sector and map unreadable and slow regions. Changes nothing.",
-            (Kind::Iops, _) => "Random 4K reads and writes at queue depth 1 and 32 (about 40 seconds).",
-            (Kind::SmallFiles, _) => "Create, rename and delete thousands of small files, then verify them: file-system integrity and files/s.",
-            (Kind::PlugPull, _) => "Write with periodic flushes; you pull the drive out mid-write. Afterwards every flushed byte must still be there.",
-            (Kind::Fix, _) => "Probe the real capacity, then repartition and format the drive to that size. DESTROYS all data.",
-            (Kind::Bench, false) => "Write and read a test file sequentially and graph the speed. Measures speed only: it does not check the capacity.",
-            (Kind::Bench, true) => "Read the start of the disk sequentially and graph the speed (read-only). Measures speed only: it does not check the capacity.",
+            (Kind::Scan, _) => "Read every sector and mark unreadable or slow areas. Does not write to the disk.",
+            (Kind::Iops, _) => "Measure random 4 KiB reads at queue depths 1 and 32. File mode also measures writes. Takes about 40 seconds.",
+            (Kind::SmallFiles, _) => "Create, rename and delete small files, then check their names and contents. Reports errors and files per second.",
+            (Kind::PlugPull, _) => "Unplug the drive while it writes test data. After reconnecting, check whether the data confirmed as saved is still there.",
+            (Kind::Fix, _) => "Estimate the usable capacity, then create and format a partition of that size. Erases all files and partitions.",
+            (Kind::Bench, false) => "Measure write and read speed using one test file. The graph shows speed across the file. This test does not verify the full capacity.",
+            (Kind::Bench, true) => "Read the start of the disk and graph the speed. Does not write to the disk or verify its capacity.",
         }
     }
     /// In the order the test list shows them; the first one is the suggested default.
-    fn for_target(raw: bool) -> &'static [Kind] {
-        if raw {
-            &[Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
+    fn for_target(raw: bool, protected: bool) -> &'static [Kind] {
+        if protected {
+            &[Kind::Info, Kind::Bench, Kind::Scan]
+        } else if raw {
+            &[Kind::Info, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
         } else {
-            &[Kind::Test, Kind::Probe, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
+            &[Kind::Info, Kind::Test, Kind::Probe, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
         }
     }
     fn erases(self, raw: bool) -> bool {
         raw && matches!(self, Kind::Test | Kind::Endurance | Kind::Probe | Kind::Fix)
     }
     fn needs_admin(self, raw: bool) -> bool {
-        raw || self == Kind::Probe
+        self != Kind::Info && (raw || self == Kind::Probe)
     }
 }
 
@@ -164,7 +235,6 @@ enum Act {
     Rerun(Kind),
     Fix(String),
     ChooseDrive,
-    Open(PathBuf),
 }
 
 pub struct Gui {
@@ -205,7 +275,7 @@ impl Gui {
         let mut g = Gui {
             disks: vec![],
             sel: None,
-            kind: Kind::Test,
+            kind: Kind::Info,
             size_limit: String::new(),
             passes: 0,
             replug: false,
@@ -234,19 +304,42 @@ impl Gui {
     }
 
     fn refresh(&mut self) {
+        self.confirm = false;
         self.disks = platform::list_disks();
+        self.reconcile_selection();
+    }
+
+    fn reconcile_selection(&mut self) {
         // Removable first; the order within a group stays as the OS lists it.
         self.disks.sort_by_key(|d| !d.removable);
-        if self.sel.is_none() {
-            // Preselect the first testable removable volume.
-            self.sel = self
-                .disks
-                .iter()
-                .filter(|d| d.protected.is_none() && d.removable)
-                .flat_map(|d| d.volumes.iter().flat_map(|v| v.mount_points.first().cloned()))
-                .next()
-                .map(Sel::Volume);
+        // A disconnected drive's completed report must remain visible.
+        if self.result.is_some() {
+            return;
         }
+        if self.sel_disk().is_none() {
+            if let Some(d) = self.disks.first() {
+                self.select(Sel::Disk(d.id.clone()));
+            } else {
+                self.sel = None;
+            }
+        }
+        if self.protected() {
+            if let Some(d) = self.sel_disk() {
+                self.sel = Some(Sel::Disk(d.id.clone()));
+            }
+            if !Kind::for_target(true, true).contains(&self.kind) {
+                self.kind = Kind::Info;
+                self.confirm = false;
+            }
+        }
+    }
+
+    fn protected(&self) -> bool {
+        self.sel_disk().is_some_and(|d| d.protected.is_some())
+    }
+
+    fn read_only(&self) -> bool {
+        self.kind == Kind::Info || (self.raw() && matches!(self.kind, Kind::Scan | Kind::Bench | Kind::Verify | Kind::Iops))
     }
 
     fn raw(&self) -> bool {
@@ -269,9 +362,9 @@ impl Gui {
     }
 
     fn select(&mut self, s: Sel) {
-        let raw = matches!(s, Sel::Disk(_));
         self.sel = Some(s);
-        self.kind = Kind::for_target(raw)[0];
+        self.kind = Kind::Info;
+        self.size_limit.clear();
         self.confirm = false;
         self.smart = None;
         self.result = None;
@@ -280,23 +373,31 @@ impl Gui {
     }
 
     fn build_job(&self) -> Result<Job, String> {
+        if !Kind::for_target(self.raw(), self.protected()).contains(&self.kind) {
+            return Err("This operation is not available for this drive.".into());
+        }
         let w: Where = match &self.sel {
             Some(Sel::Volume(m)) => app::resolve_path(m)?,
+            Some(Sel::Disk(n)) if matches!(self.kind, Kind::Bench | Kind::Scan) => app::resolve_read_disk(n)?,
             Some(Sel::Disk(n)) => app::resolve_disk(n)?,
             None => return Err("Select a drive first.".into()),
         };
+        if let (Some(selected), Some(current)) = (self.sel_disk(), w.disk()) {
+            selected.check_identity(current)?;
+        }
         let size = if self.size_limit.trim().is_empty() { None } else { Some(crate::cli::parse_size(&self.size_limit)?) };
         let opts = |passes| TestOpts { size, passes, ..Default::default() };
         Ok(match self.kind {
+            Kind::Info => return Err("Select a read check or test first.".into()),
             Kind::Test => Job::Test { w, o: TestOpts { replug: self.replug, ..opts(1) } },
             Kind::Endurance => Job::Test { w, o: opts(self.passes) },
             Kind::Verify => Job::Verify { w, h2w: false, manifest: None, loops: 1 },
             Kind::Probe => Job::Probe { w },
-            Kind::Scan => Job::Scan { w, size: None },
+            Kind::Scan => Job::Scan { w, size },
             Kind::Iops => Job::Iops { w, secs: 8.0, write: false },
             Kind::SmallFiles => Job::SmallFiles { w, count: self.count, keep: false },
             Kind::PlugPull => Job::PlugPull { w, checkpoint: 256 << 20 },
-            Kind::Bench => Job::Bench { w, size: size.unwrap_or(1 << 30), write: false },
+            Kind::Bench => Job::Bench { w, size: size.unwrap_or(if self.protected() { 256 << 20 } else { 1 << 30 }), write: false },
             Kind::Fix => {
                 let Where::Disk(d) = w else {
                     return Err("Fix needs a whole disk.".into());
@@ -327,11 +428,11 @@ impl Gui {
     }
 
     fn uses_size(&self) -> bool {
-        matches!(self.kind, Kind::Test | Kind::Endurance | Kind::Bench)
+        matches!(self.kind, Kind::Test | Kind::Endurance | Kind::Bench | Kind::Scan)
     }
 
     fn can_start(&self) -> bool {
-        self.sel.is_some() && (!self.uses_size() || self.size_error().is_none()) && (!self.destructive() || self.confirm) && (!self.needs_admin() || self.admin)
+        self.kind != Kind::Info && Kind::for_target(self.raw(), self.protected()).contains(&self.kind) && self.sel_disk().is_some() && (!self.uses_size() || self.size_error().is_none()) && (!self.destructive() || self.confirm) && (!self.needs_admin() || self.admin)
     }
 
     fn start(&mut self) {
@@ -418,22 +519,46 @@ impl Gui {
     fn save(&mut self, evidence: bool) {
         let Some(rep) = &self.result else { return };
         let dir = platform::reports_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        platform::give_to_user(&dir);
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let (name, body) = if evidence { (format!("evidence-{stamp}.html"), rep.evidence_html()) } else { (format!("report-{}-{stamp}.html", rep.command), rep.html()) };
         let p = dir.join(name);
         let json = dir.join(format!("report-{}-{stamp}.json", rep.command));
-        let _ = std::fs::write(&json, serde_json::to_string_pretty(rep).unwrap());
-        platform::give_to_user(&json);
-        match std::fs::write(&p, body) {
+        let saved = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(&json, serde_json::to_string_pretty(rep)?)?;
+            std::fs::write(&p, body)?;
+            platform::give_to_user(&dir);
+            platform::give_to_user(&json);
+            platform::give_to_user(&p);
+            Ok(())
+        })();
+        match saved {
             Ok(()) => {
-                platform::give_to_user(&p);
-                platform::open_file(&p);
+                self.open_saved(&p);
+                self.saved.retain(|old| old != &p && old != &json);
                 self.saved.push(p);
                 self.saved.push(json);
             }
             Err(e) => self.error = Some(format!("Cannot save: {e}")),
+        }
+    }
+
+    fn open_saved(&mut self, path: &std::path::Path) {
+        self.error = platform::open_file(path).err().map(|e| format!("Cannot open {}: {e}", path.display()));
+    }
+
+    fn saved_reports(&mut self, ui: &mut egui::Ui) {
+        let mut open = None;
+        for p in &self.saved {
+            if let Some(path) = saved_report_row(ui, p) {
+                open = Some(path);
+            }
+        }
+        if let Some(path) = open {
+            self.open_saved(&path);
+        }
+        if let Some(e) = &self.error {
+            ui.add(Label::new(k::text(e, 13.0, k::DANGER_ERR)).wrap());
         }
     }
 
@@ -447,12 +572,12 @@ impl Gui {
                 let (key, label) = vol_parts(m, v.map(|v| v.label.as_str()).unwrap_or_default());
                 let disk = d.map(|d| format!("Disk {}", d.id)).unwrap_or_else(|| "disk".into());
                 let sub = match v {
-                    Some(v) => format!("Volume on {disk} · {name} · {} · {} free", v.fs, size(v.free)),
+                    Some(v) => format!("Volume on {disk}: {name}, {}, {} free", v.fs, size(v.free)),
                     None => format!("Volume on {disk}"),
                 };
                 (if label.is_empty() { key } else { format!("{key}  {label}") }, sub)
             }
-            Some(Sel::Disk(id)) => (format!("Disk {id} · whole disk"), format!("{name} · {} · all partitions", d.map(|d| size(d.size)).unwrap_or_default())),
+            Some(Sel::Disk(id)) => (format!("Disk {id}: whole disk"), format!("{name}, {}, all partitions", d.map(|d| size(d.size)).unwrap_or_default())),
             None => (String::new(), String::new()),
         }
     }
@@ -479,7 +604,7 @@ impl Gui {
                 } else {
                     relaunch = k::button(ui, Look::Secondary, None, &format!("Restart as {ADMIN}"), 28.0, 12.0, self.running.is_none()).clicked();
                     ui.add_space(4.0);
-                    ui.label(k::text(format!("Not elevated: raw-mode tests need {ADMIN} rights"), 12.0, k::WARN));
+                    ui.label(k::text(format!("Whole-disk tests need {ADMIN} rights"), 12.0, k::WARN));
                     k::icon(ui, Icon::ShieldAlert, 14.0, k::WARN);
                 }
             });
@@ -501,7 +626,7 @@ impl Gui {
                 }
                 if locked {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(k::text("Locked while testing", 12.0, k::TEXT3));
+                    ui.label(k::text("Drive selection locked during test", 12.0, k::TEXT3));
                     k::icon(ui, Icon::Lock, 13.0, k::TEXT3);
                 }
             });
@@ -538,9 +663,6 @@ impl Gui {
         let mut pick = None;
         let mut open_smart = false;
         ui.scope(|ui| {
-            if d.protected.is_some() {
-                ui.multiply_opacity(0.55);
-            }
             Frame::new()
                 .fill(k::DISK)
                 .stroke(Stroke::new(1.0, if mine { k::LINE_STRONG } else { k::LINE_CARD }))
@@ -549,7 +671,11 @@ impl Gui {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    let (h, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+                    let (h, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+                    if response.clicked() && !locked {
+                        pick = Some(Sel::Disk(d.id.clone()));
+                    }
+                    k::pointer_on_hover(&response);
                     let p = ui.painter();
                     let ix = h.left() + 4.0;
                     k::paint_icon(p, Rect::from_center_size(pos2(ix + 10.0, h.center().y), Vec2::splat(16.0)), disk_icon(d), k::TEXT2);
@@ -557,11 +683,11 @@ impl Gui {
                     let tx = ix + 28.0;
                     let max_w = sz.left() - 8.0 - tx;
                     p.galley(pos2(tx, h.center().y - 17.0), k::galley(ui, &d.name(), k::medium_font(14.0), max_w), k::TEXT);
-                    p.galley(pos2(tx, h.center().y + 1.0), k::galley(ui, &format!("Disk {} · {}", d.id, bus_text(d)), FontId::proportional(12.0), max_w), k::TEXT3);
+                    p.galley(pos2(tx, h.center().y + 1.0), k::galley(ui, &format!("Disk {}, {}", d.id, bus_text(d)), FontId::proportional(12.0), max_w), k::TEXT3);
                     if let Some(why) = &d.protected {
                         ui.horizontal(|ui| {
                             ui.add_space(32.0);
-                            ui.add(Label::new(k::text(format!("Protected: {why}. Can't be selected."), 12.0, k::TEXT2)).wrap());
+                            ui.add(Label::new(k::text(format!("Read only: {why}"), 12.0, k::TEXT2)).wrap());
                         });
                         // Reading SMART is read-only, so the system disk gets it too.
                         if smart::possible(d) && !locked {
@@ -583,7 +709,7 @@ impl Gui {
                         }
                     }
                     let s = Sel::Disk(d.id.clone());
-                    if self.choice_row(ui, &s, "", "Whole disk", "erases all data", locked).clicked() {
+                    if self.choice_row(ui, &s, "", "Whole disk", "details and tests", locked).clicked() {
                         pick = Some(s);
                     }
                 });
@@ -597,16 +723,15 @@ impl Gui {
     }
 
     fn choice_row(&self, ui: &mut egui::Ui, s: &Sel, key: &str, title: &str, right: &str, locked: bool) -> egui::Response {
-        let raw = matches!(s, Sel::Disk(_));
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), if locked { Sense::hover() } else { Sense::click() });
         let on = self.sel.as_ref() == Some(s);
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, !locked, on, format!("{key} {title}, {right}").trim()));
-        let (fill, stroke, ring, dot) = k::row_colors(on, raw, resp.hovered() && !locked, k::PANEL, k::LINE_CARD);
+        let (fill, stroke, ring, dot) = k::row_colors(on, false, resp.hovered() && !locked, k::PANEL, k::LINE_CARD);
         let p = ui.painter();
         let cy = rect.center().y;
         p.rect(rect, 4.0, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
         k::radio(p, pos2(rect.left() + 15.0, cy), ring, dot);
-        let rr = k::paint_text(p, pos2(rect.right() - 8.0, cy), Align2::RIGHT_CENTER, right, 12.0, if raw { k::DANGER_TEXT } else { k::TEXT2 });
+        let rr = k::paint_text(p, pos2(rect.right() - 8.0, cy), Align2::RIGHT_CENTER, right, 12.0, k::TEXT2);
         let mut x = rect.left() + 32.0;
         if !key.is_empty() {
             // A drive letter is short; a Unix mount point may take the room the label leaves.
@@ -655,44 +780,46 @@ impl Gui {
         ui.horizontal(|ui| {
             ui.add_space(40.0);
             ui.vertical(|ui| {
-                ui.set_max_width(640.0);
+                ui.set_width(ui.available_width().min(640.0));
                 ui.spacing_mut().item_spacing.y = 8.0;
                 ui.label(k::light("Select a drive to test", 40.0, k::TEXT));
-                ui.add(Label::new(k::text("Pick a volume or a whole disk in the list on the left. What you pick decides what the test may touch.", 15.0, k::TEXT2)).wrap());
+                ui.add(Label::new(k::text("Select a volume to test its free space, or a whole disk to test across all partitions.", 15.0, k::TEXT2)).wrap());
                 ui.add_space(20.0);
-                ui.horizontal_top(|ui| {
+                ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.x = 20.0;
+                    ui.columns(2, |columns| {
                     info_card(
-                        ui,
+                        &mut columns[0],
                         k::PANEL,
                         k::LINE_CARD,
                         "Volume: file mode",
                         k::LINK,
                         "Tests free space only",
                         if cfg!(windows) {
-                            "Pick a drive letter, like E:. On a fake drive, writes can reach your files."
+                            "Select a drive letter, such as E:. A fake drive can overwrite existing files during the test."
                         } else {
-                            "Pick a mounted volume, like /media/stick. On a fake drive, writes can reach your files."
+                            "Select a mounted volume, such as /media/stick. A fake drive can overwrite existing files during the test."
                         },
                     );
                     info_card(
-                        ui,
+                        &mut columns[1],
                         k::EMPTY_RAW,
                         k::EMPTY_RAW_STROKE,
                         "Whole disk: raw mode",
                         k::DANGER,
-                        "Tests full capacity, destroys all data",
-                        &format!("Pick “Whole disk” under a drive. Needs {ADMIN} rights."),
+                        "Tests across the whole disk",
+                        &format!("Select Whole disk under a drive. Write tests erase data and need {ADMIN} rights."),
                     );
+                    });
                 });
                 ui.add_space(20.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     for (t, c) in [
-                        ("Not sure? Pick the volume of your new stick and run ", k::TEXT2),
-                        ("Quick capacity probe", k::TEXT),
+                        ("For a new drive, select its volume and run a ", k::TEXT2),
+                        ("quick capacity check", k::TEXT),
                         (", then a ", k::TEXT2),
-                        ("Full test", k::TEXT),
+                        ("full test", k::TEXT),
                         (".", k::TEXT2),
                     ] {
                         ui.label(k::text(t, 13.0, c));
@@ -726,7 +853,7 @@ impl Gui {
         let mut smart = false;
         let resp = Frame::new()
             .fill(k::PANEL)
-            .stroke(Stroke::new(1.0, if raw { k::DANGER_STROKE } else { k::LINE }))
+            .stroke(Stroke::new(1.0, if self.destructive() { k::DANGER_STROKE } else { k::LINE }))
             .corner_radius(6)
             .inner_margin(Margin { left: 14, right: 14, top: 30 + 12, bottom: 14 })
             .show(ui, |ui| {
@@ -740,7 +867,7 @@ impl Gui {
                 smart = self.identity(ui);
             });
         let r = resp.response.rect;
-        mode_band(ui, Rect::from_min_size(r.min, vec2(r.width(), 30.0)).shrink(1.0), raw, CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 }, None);
+        mode_band(ui, Rect::from_min_size(r.min, vec2(r.width(), 30.0)).shrink(1.0), raw, self.read_only(), self.protected(), CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 }, None);
         smart
     }
 
@@ -748,32 +875,31 @@ impl Gui {
     fn identity(&self, ui: &mut egui::Ui) -> bool {
         let Some(d) = self.sel_disk() else { return false };
         let mut smart = false;
-        let button = if smart::possible(d) { k::button_width(ui, "SMART data", 28.0, 12.0, false) + 12.0 } else { 0.0 };
         let usb = d.usb.as_ref();
         let items = [
-            ("Device", d.name(), String::new(), false),
-            ("Serial", if d.serial.is_empty() { "(none)".into() } else { d.serial.clone() }, String::new(), d.placeholder_serial.is_some()),
-            ("Capacity", size(d.size), format!("{} bytes", digits(d.size)), false),
-            ("USB", usb.map(|u| format!("{}:{}", u.vid, u.pid)).unwrap_or_else(|| "-".into()), usb.map(|u| usb_version(&u.usb_version)).unwrap_or_default(), false),
-            ("Link", usb.map(|u| u.link.clone()).filter(|l| !l.is_empty()).unwrap_or_else(|| d.bus.clone()), String::new(), usb.is_some_and(|u| u.slow_link)),
+            ("Device", d.name(), device_sub(d), false),
+            ("Serial number", if d.serial.is_empty() { "(none)".into() } else { d.serial.clone() }, String::new(), d.placeholder_serial.is_some()),
+            ("Reported capacity", size(d.size), format!("{} bytes", digits(d.size)), false),
+            ("USB ID", usb.map(|u| format!("{}:{}", u.vid, u.pid)).unwrap_or_else(|| "-".into()), usb.map(usb_sub).unwrap_or_default(), false),
+            ("Connection", usb.map(|u| u.link.clone()).filter(|l| !l.is_empty()).unwrap_or_else(|| d.bus.clone()), String::new(), usb.is_some_and(|u| u.slow_link)),
+            ("Firmware", if d.revision.is_empty() { "Not reported".into() } else { d.revision.clone() }, String::new(), false),
         ];
-        let fr = [1.0, 1.3, 1.6, 1.4, 0.8];
-        let unit = (ui.available_width() - 4.0 * 12.0 - button) / fr.iter().sum::<f32>();
-        ui.horizontal_top(|ui| {
+        ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            for ((label, value, sub, warn), f) in items.into_iter().zip(fr) {
-                ui.allocate_ui_with_layout(vec2(unit * f, 40.0), Layout::top_down(Align::Min), |ui| {
-                    ui.set_width(unit * f);
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(k::medium(label, 11.0, k::TEXT3));
-                    ui.add(Label::new(k::text(value, 13.0, if warn { k::WARN_TEXT } else { k::TEXT })).truncate());
-                    if !sub.is_empty() {
-                        ui.label(k::mono(sub, 11.0, k::TEXT3));
+            for row in items.chunks(3) {
+                ui.columns(3, |columns| {
+                    for (ui, (label, value, sub, warn)) in columns.iter_mut().zip(row) {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(k::medium(*label, 11.0, k::TEXT3));
+                        ui.add(Label::new(k::text(value, 13.0, if *warn { k::WARN_TEXT } else { k::TEXT })).wrap());
+                        if !sub.is_empty() {
+                            ui.add(Label::new(k::mono(sub, 11.0, k::TEXT3)).wrap());
+                        }
                     }
                 });
             }
-            if button > 0.0 {
-                ui.add_space(-12.0 + (ui.available_width() - button).max(0.0));
+            if smart::possible(d) {
+                ui.add_space(4.0);
                 smart = k::button(ui, Look::Secondary, None, "SMART data", 28.0, 12.0, true)
                     .on_hover_text("The drive's own counters: errors, temperature, hours, data written")
                     .clicked();
@@ -781,7 +907,7 @@ impl Gui {
         });
         let mut warns = vec![];
         if let Some(p) = &d.placeholder_serial {
-            warns.push(format!("Suspicious identity: {p}"));
+            warns.push(format!("Check the serial number: {p}"));
         }
         if usb.is_some_and(|u| u.slow_link) {
             warns.push("Running at USB 2 speed or slower".to_string());
@@ -853,12 +979,12 @@ impl Gui {
         Frame::new().fill(k::HINT).stroke(Stroke::new(1.0, k::LINE_CARD)).corner_radius(4).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let hint =
-                if raw { "Not sure? Run the Quick capacity probe first. If it passes, run a Full test." } else { "Not sure? Run the Quick capacity probe, then a Full test." };
+                if self.protected() { "Read checks do not write test data. They cannot confirm usable capacity." } else { "Check drive details, then choose a test." };
             ui.add(Label::new(k::text(hint, 12.0, k::TEXT2)).wrap());
         });
         ui.add_space(4.0);
         let mut group = "";
-        for &kd in Kind::for_target(raw) {
+        for &kd in Kind::for_target(raw, self.protected()) {
             if kd.group() != group {
                 group = kd.group();
                 ui.add_space(6.0);
@@ -870,6 +996,7 @@ impl Gui {
             }
             if self.test_row(ui, kd, raw).clicked() {
                 self.kind = kd;
+                self.size_limit.clear();
                 self.confirm = false;
                 self.error = None;
             }
@@ -880,7 +1007,7 @@ impl Gui {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
         let on = self.kind == kd;
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, kd.name()));
-        let (fill, stroke, ring, dot) = k::row_colors(on, raw, resp.hovered(), Color32::TRANSPARENT, Color32::TRANSPARENT);
+        let (fill, stroke, ring, dot) = k::row_colors(on, kd.erases(raw), resp.hovered(), Color32::TRANSPARENT, Color32::TRANSPARENT);
         let p = ui.painter();
         let cy = rect.center().y;
         p.rect(rect, 3.0, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
@@ -893,27 +1020,82 @@ impl Gui {
             k::paint_icon(p, Rect::from_center_size(pos2(x - 6.5, cy), Vec2::splat(13.0)), Icon::Shield, k::WARN);
             x -= 21.0;
         }
-        if kd == Kind::for_target(raw)[0] {
+        if kd == Kind::Test && !self.protected() {
             x = k::paint_medium(p, pos2(x, cy), Align2::RIGHT_CENTER, "Suggested", 11.0, k::LINK).left() - 8.0;
         }
         let left = rect.left() + 34.0;
-        let g = k::galley(ui, kd.name(), FontId::proportional(14.0), x - left);
+        let g = k::galley(ui, if raw && kd == Kind::Bench { "Read speed" } else { kd.name() }, FontId::proportional(14.0), x - left);
         p.galley(pos2(left, cy - g.size().y / 2.0), g, if on { k::TEXT } else { k::TEXT2B });
         k::pointer_on_hover(&resp);
         resp
     }
 
+    fn drive_details(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = self.sel_disk().cloned() else { return };
+        ui.label(k::medium("Drive details", 26.0, k::TEXT));
+        ui.add(Label::new(k::text("Identity reported by the operating system. Capacity has not been verified.", 13.0, k::TEXT2)).wrap());
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            if k::button(ui, Look::Plain, None, "Refresh details", 28.0, 12.0, true).clicked() {
+                self.refresh();
+            }
+            if k::button(ui, Look::Plain, None, "Copy details", 28.0, 12.0, true).clicked() {
+                let rep = app::identification_report(&d);
+                ui.ctx().copy_text(format!("{}\n\n{}\n\n{}", rep.verdict.headline, rep.verdict.details.join("\n"), rep.notes.join("\n")));
+            }
+            if k::button(ui, Look::Plain, None, "Save report", 28.0, 12.0, true).clicked() {
+                let rep = app::identification_report(&d);
+                let dir = platform::reports_dir();
+                let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+                let html = dir.join(format!("drive-info-{stamp}.html"));
+                let json = html.with_extension("json");
+                let saved = (|| -> std::io::Result<()> {
+                    std::fs::create_dir_all(&dir)?;
+                    std::fs::write(&json, serde_json::to_string_pretty(&rep)?)?;
+                    std::fs::write(&html, rep.html())?;
+                    platform::give_to_user(&dir);
+                    platform::give_to_user(&json);
+                    platform::give_to_user(&html);
+                    Ok(())
+                })();
+                match saved {
+                    Ok(()) => { self.error = None; self.saved = vec![html, json]; }
+                    Err(e) => self.error = Some(format!("Cannot save report: {e}")),
+                }
+            }
+        });
+        self.saved_reports(ui);
+        ui.add_space(10.0);
+        egui::ScrollArea::vertical().id_salt("drive-details").max_height(ui.available_height()).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            for (label, value) in d.details() {
+                ui.label(k::medium(label, 11.0, k::TEXT3));
+                ui.add(Label::new(k::text(value, 13.0, k::TEXT)).wrap());
+                ui.add_space(7.0);
+            }
+            ui.add(Label::new(k::text("Controller hints do not confirm the controller or NAND inside the drive.", 12.0, k::TEXT2)).wrap());
+        });
+    }
+
     fn test_detail(&mut self, ui: &mut egui::Ui, raw: bool) {
+        if self.kind == Kind::Info {
+            self.drive_details(ui);
+            return;
+        }
         let inner = ui.max_rect();
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.label(k::medium(self.kind.group(), 12.0, k::TEXT3));
         ui.add_space(2.0);
-        ui.label(k::medium(self.kind.name(), 30.0, k::TEXT));
+        ui.label(k::medium(if raw && self.kind == Kind::Bench { "Read speed" } else { self.kind.name() }, 30.0, k::TEXT));
         ui.add_space(6.0);
         ui.scope(|ui| {
             ui.set_max_width(ui.available_width().min(440.0));
             ui.add(Label::new(k::text(self.kind.help(raw), 14.0, k::TEXT2)).wrap());
         });
+        if self.protected() {
+            ui.add_space(10.0);
+            ui.add(Label::new(k::text("Other programs can affect the result and may respond more slowly during the check. You can cancel at any time.", 13.0, k::TEXT2)).wrap());
+        }
         ui.add_space(20.0);
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 14.0;
@@ -940,7 +1122,7 @@ impl Gui {
                         ui.set_width(text_w);
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.label(k::medium(format!("This test needs {ADMIN} rights"), 14.0, k::WARN_TEXT));
-                        ui.add(Label::new(k::text(format!("FlashTester restarts with {ADMIN} rights; pick the drive and test again there."), 12.0, k::WARN_SUB)).wrap());
+                        ui.add(Label::new(k::text("After restarting, select the drive and test again.", 12.0, k::WARN_SUB)).wrap());
                     });
                     relaunch = k::button(ui, Look::Amber, None, &label, 32.0, 13.0, true).clicked();
                 });
@@ -949,8 +1131,8 @@ impl Gui {
         if destructive {
             Frame::new().fill(k::DANGER_TINT).stroke(Stroke::new(1.0, k::DANGER_STROKE)).corner_radius(4).inner_margin(14).show(&mut ui, |ui| {
                 ui.set_width(ui.available_width());
-                let title = k::medium(format!("I understand that ALL data on {} will be destroyed", self.disk_desc()), 14.0, k::DANGER_LIGHT);
-                let sub = k::text("Partitions, files and the file system. This cannot be undone.", 12.0, k::DANGER_SUB);
+                let title = k::medium(format!("Erase all data on {}", self.disk_desc()), 14.0, k::DANGER_LIGHT);
+                let sub = k::text("This removes all files and partitions. It cannot be undone.", 12.0, k::DANGER_SUB);
                 k::checkbox(ui, &mut self.confirm, 18.0, k::DANGER, k::DANGER, title, Some(sub));
             });
         }
@@ -986,12 +1168,12 @@ impl Gui {
     fn options(&mut self, ui: &mut egui::Ui) {
         match self.kind {
             Kind::Test | Kind::Endurance => {
-                self.size_field(ui, "Size limit", "Empty = all. Examples: 8G, 500M");
+                self.size_field(ui, "Size limit", "Leave blank to test all available space. Examples: 8G, 500M");
                 if self.kind == Kind::Endurance {
                     ui.horizontal(|ui| {
                         ui.label(k::text("Passes", 12.0, k::TEXT2));
                         ui.add(egui::DragValue::new(&mut self.passes).range(0..=1000));
-                        ui.label(k::text("0 = until an error or Cancel", 12.0, k::TEXT3));
+                        ui.add(Label::new(k::text("0 means repeat until an error or cancellation", 12.0, k::TEXT3)).wrap());
                     });
                 } else {
                     k::checkbox(
@@ -1000,12 +1182,13 @@ impl Gui {
                         16.0,
                         k::TEXT3,
                         k::ACCENT,
-                        k::text("Unplug/replug before verifying", 14.0, k::TEXT),
-                        Some(k::text("Catches drives that answer reads from a cache instead of the flash.", 12.0, k::TEXT3)),
+                        k::text("Reconnect the drive before checking data", 14.0, k::TEXT),
+                        Some(k::text("Clears the device cache before reading the test data back.", 12.0, k::TEXT3)),
                     );
                 }
             }
-            Kind::Bench => self.size_field(ui, "Test size", "Empty = 1 GiB. Examples: 4G, 500M"),
+            Kind::Bench => self.size_field(ui, "Test size", if self.protected() { "Leave blank for a short 256 MiB check. Examples: 1G, 500M" } else { "Leave blank for 1 GiB. Examples: 4G, 500M" }),
+            Kind::Scan => self.size_field(ui, "Scan size", "Leave blank to read the whole disk. Examples: 4G, 500M"),
             Kind::SmallFiles => {
                 ui.horizontal(|ui| {
                     ui.label(k::text("Files", 12.0, k::TEXT2));
@@ -1032,6 +1215,7 @@ impl Gui {
 
     fn size_field(&mut self, ui: &mut egui::Ui, label: &str, help: &str) {
         let err = self.size_error();
+        let hint = if self.kind == Kind::Bench { if self.protected() { "256 MiB" } else { "1 GiB" } } else { "all" };
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(k::text(label, 12.0, k::TEXT2));
@@ -1044,9 +1228,9 @@ impl Gui {
                     .margin(Margin::ZERO)
                     .font(FontId::monospace(13.0))
                     .text_color(if err.is_some() { k::DANGER_LIGHT } else { k::TEXT })
-                    .hint_text(k::mono("all", 13.0, k::TEXT3));
+                    .hint_text(k::mono(hint, 13.0, k::TEXT3));
                 ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(10.0, 6.0)))).add(edit);
-                ui.label(k::text(help, 12.0, k::TEXT3));
+                ui.add(Label::new(k::text(help, 12.0, k::TEXT3)).wrap());
             });
             if let Some(e) = err {
                 ui.label(k::text(e, 12.0, k::DANGER_ERR));
@@ -1056,14 +1240,14 @@ impl Gui {
 
     fn foot_note(&self, raw: bool) -> (String, Color32) {
         if self.destructive() && !self.confirm {
-            return ("Tick the box above to enable Start.".into(), k::DANGER_ERR);
+            return ("Confirm data erasure above to start.".into(), k::DANGER_ERR);
         }
         if self.needs_admin() && !self.admin {
             return (String::new(), k::TEXT2);
         }
         let free = self.sel_volume().map(|v| v.free).unwrap_or(0);
         let limit = crate::cli::parse_size(&self.size_limit).ok().map_or(free, |l| l.min(free));
-        let fake = "On a fake drive these writes can land on existing files: back them up first.";
+        let fake = "Back up your files first. A fake drive can overwrite them during this test.";
         let id = self.sel_disk().map(|d| d.id.clone()).unwrap_or_default();
         let s = match (self.kind, raw) {
             (Kind::Test | Kind::Endurance, false) => {
@@ -1077,8 +1261,8 @@ impl Gui {
                 format!("Writes {} small files into a test folder.", self.count)
             }
             (Kind::Bench, false) => "Writes and reads one test file.".into(),
-            (Kind::Iops, false) => "Works inside one test file in free space.".into(),
-            (Kind::Verify | Kind::Scan | Kind::Bench | Kind::Iops, _) => "Reads only. Changes nothing.".into(),
+            (Kind::Iops, false) => "Reads and writes one test file in free space.".into(),
+            (Kind::Verify | Kind::Scan | Kind::Bench | Kind::Iops, _) => "Reads data without writing to the disk.".into(),
             _ => format!("All data on disk {id} will be destroyed."),
         };
         (s, k::TEXT2)
@@ -1089,9 +1273,9 @@ impl Gui {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
         let mut test = self.kind.name().to_string();
         if self.kind == Kind::Test && self.replug {
-            test += " · replug before verify";
+            test += ", reconnect before checking data";
         }
-        mode_band(ui, rect, self.raw(), CornerRadius::same(4), Some((self.target_text(), test)));
+        mode_band(ui, rect, self.raw(), self.read_only(), self.protected(), CornerRadius::same(4), Some((self.target_text(), test)));
     }
 
     // ---- run view ----
@@ -1107,7 +1291,7 @@ impl Gui {
                 r.ctx.cancel();
             }
         }
-        let cells = gui_map::live(&s, &self.curves);
+        let cells = gui_map::live(&s, &self.curves, self.raw() && matches!(self.kind, Kind::Scan | Kind::Bench));
         self.viz_row(ui, cells.as_deref(), "Block map", None);
         self.live = s;
         self.log_bar(ui, true);
@@ -1119,7 +1303,7 @@ impl Gui {
             None => (prompt, ""),
         };
         let at = if prompt.starts_with("Drive removed") { 1 } else { 0 };
-        let steps = if self.kind == Kind::PlugPull { ["Pull the drive out", "Plug back in", "Check flushed data"] } else { ["Unplug", "Plug back in", "Verify"] };
+        let steps = if self.kind == Kind::PlugPull { ["Pull the drive out", "Reconnect", "Check flushed data"] } else { ["Unplug", "Reconnect", "Check data"] };
         Frame::new().fill(k::WARN).corner_radius(6).inner_margin(Margin::symmetric(24, 20)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -1151,7 +1335,7 @@ impl Gui {
                     });
                     ui.allocate_ui_with_layout(vec2(ui.available_width(), 10.0), Layout::top_down(Align::Min), |ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.label(k::medium("Action needed: the test is waiting for you", 13.0, k::WARN_INK));
+                        ui.label(k::medium("Follow the steps above to continue the test", 13.0, k::WARN_INK));
                         ui.add(Label::new(k::medium(head, 34.0, k::WARN_INK)).wrap());
                         if !sub.is_empty() {
                             ui.add(Label::new(k::text(sub, 16.0, k::WARN_INK)).wrap());
@@ -1245,7 +1429,7 @@ impl Gui {
         let eta =
             if s.done > 0 && el > 2.0 && s.total > 0 && !waiting { crate::report::duration(el * s.total.saturating_sub(s.done) as f64 / s.done as f64) } else { "–".into() };
         // Values at 24 pt, or 20 pt when a wide percentage leaves too little room.
-        let stats = [(done_label, done), (speed_label, speed), ("Time left", eta)];
+        let stats = [(done_label, done), (speed_label, speed), ("Estimated time left", eta)];
         let width = |pt: f32| stats.iter().map(|(_, v)| ui.painter().layout_no_wrap(v.clone(), k::medium_font(pt), k::TEXT).size().x + 24.0).sum::<f32>();
         let pt = if width(24.0) <= mid.width() { 24.0 } else { 20.0 };
         let mut x = mid.left();
@@ -1358,35 +1542,18 @@ impl Gui {
                         .horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             k::icon(ui, if self.summary_open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.0, k::TEXT2);
-                            ui.label(k::text("Full text summary", 12.0, k::TEXT2));
+                            ui.label(k::text("Test details", 12.0, k::TEXT2));
                         })
                         .response;
                     let r = ui.interact(r.rect, egui::Id::new("summary-toggle"), Sense::click());
-                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, "Full text summary"));
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, "Test details"));
                     k::pointer_on_hover(&r);
                     if r.clicked() {
                         self.summary_open = !self.summary_open;
                     }
                 });
             });
-            if let Some(e) = &self.error {
-                ui.label(k::text(e, 13.0, k::DANGER_ERR));
-            }
-            for p in &self.saved {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(k::mono("Saved", 12.0, k::OK));
-                    ui.label(k::mono(p.display().to_string(), 12.0, k::TEXT2));
-                    if p.extension().is_some_and(|e| e == "html") {
-                        if ui.link(k::mono("Open", 12.0, k::LINK)).clicked() {
-                            act = Some(Act::Open(p.clone()));
-                        }
-                        if ui.link(k::mono("Show folder", 12.0, k::LINK)).clicked() {
-                            act = Some(Act::Open(p.parent().map(|d| d.to_path_buf()).unwrap_or_default()));
-                        }
-                    }
-                });
-            }
+            self.saved_reports(ui);
             if self.summary_open {
                 Frame::new().fill(k::BAR).stroke(Stroke::new(1.0, k::LINE_SUBTLE)).corner_radius(4).inner_margin(10).show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -1401,7 +1568,6 @@ impl Gui {
 
         match act {
             Some(Act::Save(evidence)) => self.save(evidence),
-            Some(Act::Open(p)) => platform::open_file(&p),
             Some(Act::Again) => self.result = None,
             Some(Act::Rerun(kd)) => {
                 self.kind = kd;
@@ -1468,12 +1634,16 @@ impl Gui {
                             Status::Fake => {
                                 b(evidence, "Save evidence sheet", Act::Save(true));
                                 if let Some(id) = disk.clone() {
-                                    b(Look::Outline(k::DANGER_STROKE), "Fix: repartition to real size", Act::Fix(id));
+                                    b(Look::Outline(k::DANGER_STROKE), "Resize and format", Act::Fix(id));
                                 }
                             }
                             Status::Defective | Status::ReadOnly => {
                                 b(evidence, "Save evidence sheet", Act::Save(true));
-                                b(Look::Outline(k::DANGER_STROKE), "Run Full test again", Act::Rerun(Kind::Test));
+                                if self.protected() || rep.read_only {
+                                    b(Look::Outline(stroke), "Run another read check", Act::Again);
+                                } else {
+                                    b(Look::Outline(k::DANGER_STROKE), "Run full test again", Act::Rerun(Kind::Test));
+                                }
                             }
                             Status::Ok => {
                                 b(Look::Outline(stroke), &format!("Run another test on {target}"), Act::Again);
@@ -1500,15 +1670,39 @@ impl Gui {
     }
 }
 
+/// Keep actions below the path so long file names cannot push them off-screen.
+fn saved_report_row(ui: &mut egui::Ui, path: &std::path::Path) -> Option<PathBuf> {
+    let mut open = None;
+    ui.push_id(path, |ui| {
+        ui.label(k::mono("Saved", 12.0, k::OK));
+        ui.add(Label::new(k::mono(path.display().to_string(), 12.0, k::TEXT2)).wrap());
+        ui.horizontal_wrapped(|ui| {
+            if k::button(ui, Look::Secondary, None, "Open file", 28.0, 12.0, true).clicked() {
+                open = Some(path.to_path_buf());
+            }
+            if let Some(parent) = path.parent() {
+                if k::button(ui, Look::Plain, None, "Open folder", 28.0, 12.0, true).clicked() {
+                    open = Some(parent.to_path_buf());
+                }
+            }
+        });
+    });
+    open
+}
+
 /// A file-mode / raw-mode strip. With `slim`, it also carries the target and test name.
-fn mode_band(ui: &egui::Ui, rect: Rect, raw: bool, radius: CornerRadius, slim: Option<((String, String), String)>) {
-    let (fill, fg, stroke) = if raw { (k::DANGER_TINT, k::DANGER_BAND, k::DANGER_STROKE) } else { (k::SEL, k::LINK_LIGHT, k::LINE) };
+fn mode_band(ui: &egui::Ui, rect: Rect, raw: bool, read_only: bool, protected: bool, radius: CornerRadius, slim: Option<((String, String), String)>) {
+    let (fill, fg, stroke) = if raw && !read_only { (k::DANGER_TINT, k::DANGER_BAND, k::DANGER_STROKE) } else { (k::SEL, k::LINK_LIGHT, k::LINE) };
     let p = ui.painter();
     let cy = rect.center().y;
-    let (label, line) = if raw {
-        ("Raw mode", "Tests the whole disk. Destroys all data on it.")
+    let (label, line) = if protected {
+        ("Protected drive (read only)", "Writes and file tests are blocked.")
+    } else if read_only {
+        ("Read only", "No test data is written to the drive.")
+    } else if raw {
+        ("Raw mode", "Whole-disk access. Write tests erase data.")
     } else {
-        ("File mode", "Tests free space only. On a fake drive, writes can still reach your files.")
+        ("File mode", "Tests free space. A fake drive can overwrite existing files.")
     };
     match slim {
         None => {
@@ -1530,7 +1724,7 @@ fn mode_band(ui: &egui::Ui, rect: Rect, raw: bool, radius: CornerRadius, slim: O
 fn info_card(ui: &mut egui::Ui, fill: Color32, stroke: Color32, head: &str, head_color: Color32, title: &str, sub: &str) {
     Frame::new().fill(fill).stroke(Stroke::new(1.0, stroke)).corner_radius(6).inner_margin(16).show(ui, |ui| {
         ui.vertical(|ui| {
-            ui.set_width(268.0);
+            ui.set_width(ui.available_width().min(268.0));
             ui.spacing_mut().item_spacing.y = 5.0;
             ui.label(k::medium(head, 13.0, head_color));
             ui.add(Label::new(k::medium(title, 16.0, k::TEXT)).wrap());
@@ -1645,6 +1839,26 @@ fn disk_icon(d: &DiskInfo) -> Icon {
 
 fn usb_version(v: &str) -> String {
     v.parse::<f32>().map(|f| format!("USB {f:.1}")).unwrap_or_else(|_| format!("USB {v}"))
+}
+
+/// Under the USB ID: USB version, controller firmware release and who the vendor ID belongs to.
+fn usb_sub(u: &crate::platform::UsbInfo) -> String {
+    let mut s = usb_version(&u.usb_version);
+    if !u.release.is_empty() {
+        s += &format!(", firmware {}", u.release);
+    }
+    if let Some(n) = crate::ids::usb_vendor(&u.vid).or_else(|| Some(u.db_vendor.clone()).filter(|v| !v.is_empty())) {
+        s += &format!(", {n}");
+    }
+    s
+}
+
+/// Under the device name: its controller or bridge chip, or an SD card's maker and date.
+fn device_sub(d: &DiskInfo) -> String {
+    match &d.card {
+        Some(c) => format!("{} card by {}, made {}", c.kind, if c.maker.is_empty() { "unknown maker" } else { &c.maker }, c.date),
+        None => d.controller.clone(),
+    }
 }
 
 fn bus_text(d: &DiskInfo) -> String {

@@ -1,0 +1,696 @@
+# NVMe controllers from the PCI ID Repository (https://pci-ids.ucw.cz/), version 2026.10.15.
+# Maintained by Albert Pool, Martin Mares and other volunteers of the PCI ID Project.
+# pci.ids may be distributed under the GNU GPL (version 2 or later) or the 3-clause
+# BSD licence; this subset is used under the 3-clause BSD licence.
+# Format: vendor device vendor name | device name
+01de 0000 Oxide Computer Company | Propolis NVMe Controller
+025e 0b60 Solidigm | NVMe DC SSD [Sentinel Rock Plus controller]
+025e 0b70 Solidigm | NVMe DC SSD [Yorktown controller]
+025e 2b59 Solidigm | NVMe DC SSD [Atomos Prime]
+025e f1ab Solidigm | P41 Plus NVMe SSD (DRAM-less) [Echo Harbor]
+025e f1ac Solidigm | P44 Pro NVMe SSD [Hollywood Beach]
+1022 1499 Advanced Micro Devices, Inc. [AMD] | Starship/Matisse NVMe
+1028 2600 Dell | ENT NVMe RT1
+104d 9121 Sony Corporation | Nextorage NEM-PA NVMe SSD for PlayStation
+106b 2001 Apple Inc. | S1X NVMe Controller
+106b 2002 Apple Inc. | S3ELab NVMe Controller
+106b 2003 Apple Inc. | S3X NVMe Controller
+106b 2005 Apple Inc. | ANS2 NVMe Controller
+10ec 5760 Realtek Semiconductor Co., Ltd. | RTS5763DL x2 NVMe SSD Controller
+10ec 5762 Realtek Semiconductor Co., Ltd. | RTS5762 NVMe SSD Controller
+10ec 5763 Realtek Semiconductor Co., Ltd. | RTS5763DL NVMe SSD Controller (DRAM-less)
+10ec 5765 Realtek Semiconductor Co., Ltd. | RTS5765DL NVMe SSD Controller (DRAM-less)
+10ec 5770 Realtek Semiconductor Co., Ltd. | RTS5770DL NVMe SSD Controller (DRAM-less)
+10ec 5771 Realtek Semiconductor Co., Ltd. | RTS5771 NVMe SSD Controller (DRAM-less)
+10ec 5772 Realtek Semiconductor Co., Ltd. | RTS5772DL NVMe SSD Controller (DRAM-less)
+1103 7103 HighPoint Technologies, Inc. | SSD7103 PCIe Gen3 x16 4-Port M.2 NVMe RAID Controller
+1103 7105 HighPoint Technologies, Inc. | SSD7105 PCIe Gen3 x16 4-Port M.2 NVMe RAID Controller
+1103 7110 HighPoint Technologies, Inc. | SSD7110 PCIe Gen3 x16 NVMe RAID Controller
+1103 7505 HighPoint Technologies, Inc. | SSD7505 PCIe Gen4 x16 4-Port M.2 NVMe RAID Controller
+1103 7540 HighPoint Technologies, Inc. | SSD7540 PCIe Gen4 x16 8-Port M.2 NVMe RAID Controller
+1103 7580 HighPoint Technologies, Inc. | SSD7580 PCIe Gen4 x16 8-Port M.2 NVMe RAID Controller
+111d 80d2 Microsemi / PMC / IDT | F32P08xG3 NVMe controller
+1179 010e Toshiba Corporation | PXP04 NVMe SSD
+1179 010f Toshiba Corporation | XG3 NVMe SSD Controller
+1179 0110 Toshiba Corporation | Cx5 NVMe SSD Controller
+1179 0113 Toshiba Corporation | BG3 x2 NVMe SSD Controller (DRAM-less)
+1179 0115 Toshiba Corporation | XG4 NVMe SSD Controller
+1179 0116 Toshiba Corporation | XG5 NVMe SSD Controller
+1179 0119 Toshiba Corporation | XD5 NVMe SSD Controller
+1179 011a Toshiba Corporation | XG6 NVMe SSD Controller
+1217 8760 O2 Micro, Inc. | FORESEE E2M2 NVMe SSD
+1235 5820 SMART Modular Technologies | DC5820 NVMe SSD
+126f 2260 Silicon Motion, Inc. | SM2260 NVMe SSD Controller
+126f 2261 Silicon Motion, Inc. | SM2261XT x2 NVMe SSD Controller (DRAM-less)
+126f 2262 Silicon Motion, Inc. | SM2262/SM2262EN SSD Controller
+126f 2263 Silicon Motion, Inc. | SM2263EN/SM2263XT (DRAM-less) NVMe SSD Controllers
+126f 2268 Silicon Motion, Inc. | SM2268XT (DRAM-less) NVMe SSD Controller
+126f 2269 Silicon Motion, Inc. | SM2269XT (DRAM-less) NVMe SSD Controller
+126f 2504 Silicon Motion, Inc. | SM2504XT NVMe 2.0 SSD Controller (DRAM-less)
+126f 2508 Silicon Motion, Inc. | SM2508 NVMe 2.0 SSD Controller
+126f 2708 Silicon Motion, Inc. | SM2708 x2 NVMe SD Express SSD Controller (DRAM-less)
+126f 8366 Silicon Motion, Inc. | SM8366 NVMe SSD Controller [MonTitan]
+126f 8388 Silicon Motion, Inc. | SM8388 NVMe SSD Controller [MonTitan]
+12af 5831 TDK Corporation | GBDriver GX1 x2 NVMe SSD Controller (DRAM-less)
+1344 5180 Micron Technology Inc | 9100 PRO NVMe SSD
+1344 5181 Micron Technology Inc | 9100 MAX NVMe SSD
+1344 5188 Micron Technology Inc | 7100 ECO NVMe SSD
+1344 5189 Micron Technology Inc | 7100 MAX NVMe SSD
+1344 5190 Micron Technology Inc | 9200 ECO NVMe SSD
+1344 5191 Micron Technology Inc | 9200 PRO NVMe SSD
+1344 5192 Micron Technology Inc | 9200 MAX NVMe SSD
+1344 5196 Micron Technology Inc | 9400 PRO NVMe SSD
+1344 5197 Micron Technology Inc | 9400 MAX NVMe SSD
+1344 51a2 Micron Technology Inc | 7300 PRO NVMe SSD
+1344 51a3 Micron Technology Inc | 7300 MAX NVMe SSD
+1344 51b1 Micron Technology Inc | 9300 PRO NVMe SSD
+1344 51b2 Micron Technology Inc | 9300 MAX NVMe SSD
+1344 51b7 Micron Technology Inc | 7500 PRO NVMe SSD
+1344 51b8 Micron Technology Inc | 7500 MAX NVMe SSD
+1344 51b9 Micron Technology Inc | 6500 ION NVMe SSD
+1344 51bb Micron Technology Inc | 9550 PRO NVMe SSD
+1344 51bd Micron Technology Inc | 9550 MAX NVMe SSD
+1344 51c0 Micron Technology Inc | 7400 PRO NVMe SSD
+1344 51c1 Micron Technology Inc | 7400 MAX NVMe SSD
+1344 51c3 Micron Technology Inc | 7450 PRO NVMe SSD
+1344 51c4 Micron Technology Inc | 7450 MAX NVMe SSD
+1344 51c9 Micron Technology Inc | 7600 PRO NVMe SSD
+1344 51ca Micron Technology Inc | 7600 MAX NVMe SSD
+1344 51cb Micron Technology Inc | 6550 ION NVMe SSD
+1344 51cc Micron Technology Inc | 6600 ION NVMe SSD
+1344 51cd Micron Technology Inc | 9650 PRO NVMe SSD
+1344 51ce Micron Technology Inc | 9650 PRO NVMe SSD
+1344 5404 Micron Technology Inc | 2210 NVMe SSD [Cobain]
+1344 5405 Micron Technology Inc | 2300 NVMe SSD [Santana]
+1344 5407 Micron Technology Inc | 3400 NVMe SSD [Hendrix]
+1344 5410 Micron Technology Inc | 2200S NVMe SSD [Cassandra]
+1344 5411 Micron Technology Inc | 2450 NVMe SSD [HendrixV] (DRAM-less)
+1344 5413 Micron Technology Inc | 2400 NVMe SSD (DRAM-less)
+1344 5414 Micron Technology Inc | 3460 NVMe SSD
+1344 5415 Micron Technology Inc | 3500 NVMe SSD
+1344 5416 Micron Technology Inc | 2550 NVMe SSD (DRAM-less)
+1344 5425 Micron Technology Inc | 2500 NVMe SSD (DRAM-less)
+1344 5427 Micron Technology Inc | 2650 NVMe SSD (DRAM-less)
+1344 5428 Micron Technology Inc | 4600 NVMe SSD
+1344 5429 Micron Technology Inc | 2600 NVMe SSD (DRAM-less)
+1344 6001 Micron Technology Inc | 2100AI NVMe SSD [Nitro]
+1344 6003 Micron Technology Inc | 4150AT NVMe SSD
+1344 6004 Micron Technology Inc | 4100AT NVMe SSD (DRAM-less)
+1414 c03e Microsoft Corporation | OpenVMM NVMe Controller
+144d 1600 Samsung Electronics Co Ltd | S4LN053X01 AHCI SSD Controller(Apple slot)
+144d a801 Samsung Electronics Co Ltd | S4LN058A01[SSUBX] AHCI SSD Controller (Apple slot)
+144d a802 Samsung Electronics Co Ltd | NVMe SSD Controller SM951/PM951
+144d a804 Samsung Electronics Co Ltd | NVMe SSD Controller SM961/PM961/SM963
+144d a806 Samsung Electronics Co Ltd | PM971 BGA PCIe x2 NVMe SSD
+144d a808 Samsung Electronics Co Ltd | NVMe SSD Controller SM981/PM981/PM983
+144d a809 Samsung Electronics Co Ltd | NVMe SSD Controller 980 (DRAM-less)
+144d a80a Samsung Electronics Co Ltd | NVMe SSD Controller PM9A1/PM9A3/980PRO
+144d a80b Samsung Electronics Co Ltd | NVMe SSD Controller PM9B1 (DRAM-less)
+144d a80c Samsung Electronics Co Ltd | NVMe SSD Controller S4LV008[Pascal]
+144d a80d Samsung Electronics Co Ltd | NVMe SSD Controller PM9C1a (DRAM-less)
+144d a80e Samsung Electronics Co Ltd | NVMe SSD Controller PM9D3a
+144d a810 Samsung Electronics Co Ltd | NVMe SSD 9100 PRO [PM9E1]
+144d a820 Samsung Electronics Co Ltd | NVMe SSD Controller 171X
+144d a821 Samsung Electronics Co Ltd | NVMe SSD Controller 172X
+144d a822 Samsung Electronics Co Ltd | NVMe SSD Controller 172Xa/172Xb
+144d a824 Samsung Electronics Co Ltd | NVMe SSD Controller PM173X
+144d a825 Samsung Electronics Co Ltd | NVMe SSD Controller PM173Xa
+144d a826 Samsung Electronics Co Ltd | NVMe SSD Controller PM174X
+144d a900 Samsung Electronics Co Ltd | NVMe SSD Controller PM9DXa
+144d aa00 Samsung Electronics Co Ltd | NVMe SSD Controller BM1743
+144d ac00 Samsung Electronics Co Ltd | NVMe SSD Controller PM175x
+14a4 2100 Lite-On Technology Corporation | CA1-8D128 NVMe SSD
+14a4 21f1 Lite-On Technology Corporation | Plextor NVMe SSD
+14a4 2200 Lite-On Technology Corporation | CX2-8B256, CX2-8B512 NVMe SSD
+14a4 22a0 Lite-On Technology Corporation | EP2-KB960 NVMe SSD
+14a4 22f1 Lite-On Technology Corporation | M8Pe Series NVMe SSD
+14a4 2300 Lite-On Technology Corporation | CA3-8D256, CA3-8D512 NVMe SSD
+14a4 23f1 Lite-On Technology Corporation | M9PeG, M9PeGN, M9PeY NVMe SSD
+14a4 2f00 Lite-On Technology Corporation | CAZ-82512 NVMe SSD
+14a4 3500 Lite-On Technology Corporation | CA5-8D512 NVMe SSD
+14a4 35f1 Lite-On Technology Corporation | PLEXTOR PX-256M9PGN+ NVMe SSD
+14a4 5100 Lite-On Technology Corporation | CB1-SD256, CB1-SD512 NVMe SSD
+14a4 9100 Lite-On Technology Corporation | CL1-3D256, CL1-8D512 NVMe SSD (DRAM-less)
+15ad 07f0 VMware | NVMe SSD Controller
+15b3 6001 Mellanox Technologies | NVMe SNAP Controller
+15b7 5001 Sandisk Corp | WD Black NVMe SSD
+15b7 5002 Sandisk Corp | SanDisk Extreme Pro / WD Black 2018/SN750/PC SN720 NVMe SSD
+15b7 5003 Sandisk Corp | WD Blue SN500 / PC SN520 x2 M.2 2280 NVMe SSD
+15b7 5004 Sandisk Corp | PC SN520 x2 M.2 2230 NVMe SSD
+15b7 5005 Sandisk Corp | PC SN520 x2 M.2 2242 NVMe SSD
+15b7 5006 Sandisk Corp | SanDisk Extreme Pro / WD Black SN750 / PC SN730 / Red SN700 NVMe SSD
+15b7 5007 Sandisk Corp | IX SN530 NVMe SSD / microSD Express Card (DRAM-less)
+15b7 5008 Sandisk Corp | PC SN530 NVMe SSD (DRAM-less)
+15b7 5009 Sandisk Corp | SanDisk Ultra 3D / WD PC SN530, IX SN530, Blue SN550 NVMe SSD (DRAM-less)
+15b7 500b Sandisk Corp | PC SN530 NVMe SSD
+15b7 500d Sandisk Corp | WD Ultrastar DC SN340 NVMe SSD
+15b7 5011 Sandisk Corp | WD PC SN810 / Black SN850 NVMe SSD
+15b7 5014 Sandisk Corp | WD PC SN540 / Green SN350 NVMe SSD 1 TB (DRAM-less)
+15b7 5015 Sandisk Corp | PC SN740 NVMe SSD (DRAM-less)
+15b7 5016 Sandisk Corp | WD PC SN740 NVMe SSD 512GB (DRAM-less)
+15b7 5017 Sandisk Corp | WD SN560/SN740/SN770/SN5000 NVMe SSD
+15b7 5019 Sandisk Corp | WD Green SN350 240GB (DRAM-less) / SN560E NVMe SSD
+15b7 501a Sandisk Corp | SanDisk Ultra 3D / WD Blue SN570 NVMe SSD (DRAM-less)
+15b7 501d Sandisk Corp | WD Blue SN550 NVMe SSD 2TB (DRAM-less)
+15b7 501e Sandisk Corp | PC SN735 / WD_BLACK SN750 SE NVMe SSD (DRAM-less)
+15b7 501f Sandisk Corp | WD PC SN735 NVMe SSD 512GB (DRAM-less)
+15b7 5025 Sandisk Corp | WD Blue SN570 NVMe SSD 2TB
+15b7 5026 Sandisk Corp | WD PC SN735 NVMe SSD 1TB (DRAM-less)
+15b7 5028 Sandisk Corp | WD CH SN560 NVMe SSD
+15b7 5030 Sandisk Corp | WD Black SN850X NVMe SSD
+15b7 5034 Sandisk Corp | WD PC SN5000S M.2 2230 NVMe SSD (DRAM-less)
+15b7 5035 Sandisk Corp | WD PC SN5000S M.2 2242 NVMe SSD (DRAM-less)
+15b7 5036 Sandisk Corp | WD PC SN5000S M.2 2280 NVMe SSD (DRAM-less)
+15b7 5041 Sandisk Corp | WD Blue SN580 NVMe SSD (DRAM-less)
+15b7 5042 Sandisk Corp | WD Black SN770M NVMe SSD (DRAM-less)
+15b7 5043 Sandisk Corp | WD PC SN7100S M.2 2230 NVMe SSD (DRAM-less)
+15b7 5044 Sandisk Corp | WD PC SN7100S M.2 2242 NVMe SSD (DRAM-less)
+15b7 5045 Sandisk Corp | WD_BLACK SN7100/WD PC SN7100S M.2 2280 NVMe SSD (DRAM-less)
+15b7 5046 Sandisk Corp | SanDisk Extreme NVMe SSD (DRAM-less)
+15b7 5049 Sandisk Corp | SN8000S NVMe SSD
+15b7 504a Sandisk Corp | WD Blue SN5000 NVMe SSD (DRAM-less)
+15b7 5050 Sandisk Corp | WD PC SN8050S / WD_BLACK SN8100 NVMe SSD
+15b7 5061 Sandisk Corp | PC SN5100S M.2 2230 NVMe SSD (DRAM-less)
+15b7 5062 Sandisk Corp | PC SN5100S M.2 2242 NVMe SSD (DRAM-less)
+15b7 5063 Sandisk Corp | PC SN5100S / WD Blue SN5100 M.2 2280 NVMe SSD (DRAM-less)
+15b7 5070 Sandisk Corp | SanDisk Optimus 5110, PC SN4100S, PC SN6100S / WD Green SN3000 NVMe SSD (DRAM-less)
+177d 9703 Cavium, Inc. | CN23XX [LiquidIO II] NVMe Controller
+177d 9713 Cavium, Inc. | CN23XX [LiquidIO II] NVMe SRIOV Virtual Function
+17d3 1886 Areca Technology Corp. | ARC-1886 series PCIe 4.0 to NVMe/SAS/SATA 16/12/6Gb RAID Controller
+17d3 188a Areca Technology Corp. | ARC-1886 series PCIe 4.0 to NVMe/SAS/SATA 16/12/6Gb RAID Controller
+1987 5007 Phison Electronics Corporation | E7 NVMe Controller
+1987 5008 Phison Electronics Corporation | E8 PCIe3 x2 NVMe Controller
+1987 5012 Phison Electronics Corporation | E12 NVMe Controller
+1987 5013 Phison Electronics Corporation | PS5013-E13 PCIe3 NVMe Controller (DRAM-less)
+1987 5015 Phison Electronics Corporation | PS5015-E15 PCIe3 NVMe Controller (DRAM-less)
+1987 5016 Phison Electronics Corporation | E16 PCIe4 NVMe Controller
+1987 5017 Phison Electronics Corporation | PS5017 x2 NVMe SD Express SSD Controller (DRAM-less)
+1987 5018 Phison Electronics Corporation | E18 PCIe4 NVMe Controller
+1987 5019 Phison Electronics Corporation | PS5019-E19 PCIe4 NVMe Controller (DRAM-less)
+1987 5020 Phison Electronics Corporation | PS5020-E20 (X1) PCIe4 NVMe Controller
+1987 5021 Phison Electronics Corporation | PS5021-E21 PCIe4 NVMe Controller (DRAM-less)
+1987 5026 Phison Electronics Corporation | PS5026-E26 PCIe5 NVMe Controller
+1987 5027 Phison Electronics Corporation | PS5027-E27T PCIe4 NVMe Controller (DRAM-less)
+1987 5028 Phison Electronics Corporation | PS5028-E28 PCIe5 NVMe Controller
+1987 5029 Phison Electronics Corporation | PS5029-E29T PCIe4 NVMe Controller (DRAM-less)
+1987 5031 Phison Electronics Corporation | PS5031-E31T PCIe5 NVMe Controller
+1987 5037 Phison Electronics Corporation | PS5037-E37T PCIe5 NVMe Controller (DRAM-less)
+1987 5302 Phison Electronics Corporation | PS5302-X2 PCIe5 NVMe Controller
+1998 0001 Toyou Feiji Electronics Co., Ltd. | TOBOLT1 51987 NVMe SSD
+19e5 0123 Huawei Technologies Co., Ltd. | ES3000 V3 NVMe PCIe SSD
+19e5 3714 Huawei Technologies Co., Ltd. | ES3000 V5 NVMe PCIe SSD
+19e5 3754 Huawei Technologies Co., Ltd. | ES3000 V6 NVMe PCIe SSD
+19e5 a126 Huawei Technologies Co., Ltd. | HiSilicon SDI NVMe Storage Controller
+1ae0 001f Google, Inc. | NVMe device
+1b36 0010 Red Hat, Inc. | QEMU NVM Express Controller
+1b4b 1092 Marvell Technology Group Ltd. | 88SS1092 NVMe SSD Controller
+1b4b 1160 Marvell Technology Group Ltd. | 88NV1160 PCIe x2 NVMe SSD Controller (DRAM-less)
+1b4b 1321 Marvell Technology Group Ltd. | 88SS1321 NVMe SSD Controller
+1b4b 9183 Marvell Technology Group Ltd. | 88SS9183 PCIe SSD Controller
+1b96 2200 Western Digital | Ultrastar DC SN630 NVMe SSD
+1b96 2201 Western Digital | Ultrastar DC SN630 NVMe SSD
+1b96 2300 Western Digital | Ultrastar DC SN840 NVMe SSD
+1b96 2400 Western Digital | Ultrastar DC SN640 NVMe SSD
+1b96 2401 Western Digital | Ultrastar DC SN640 NVMe SSD
+1b96 2402 Western Digital | Ultrastar DC SN640 NVMe SSD
+1b96 2404 Western Digital | Ultrastar DC SN640 NVMe SSD
+1b96 2500 Western Digital | Ultrastar DC SN840 NVMe SSD
+1b96 2600 Western Digital | Ultrastar DC ZN540 ZNS NVMe SSD
+1b96 2700 Western Digital | Ultrastar DC SN650 NVMe SSD
+1b96 2701 Western Digital | Ultrastar DC SN650 NVMe SSD
+1b96 2702 Western Digital | Ultrastar DC SN650 NVMe SSD
+1b96 2720 Western Digital | Ultrastar DC SN650 NVMe SSD
+1b96 2721 Western Digital | Ultrastar DC SN650 NVMe SSD
+1b96 2722 Western Digital | Ultrastar DC SN655 NVMe SSD
+1b96 2750 Western Digital | Ultrastar DC SN861 NVMe SSD
+1b96 2751 Western Digital | Ultrastar DC SN861 NVMe SSD
+1b96 3001 Western Digital | RapidFlex C2000 NVMe Initiator
+1b96 3714 Western Digital | PC SN730 NVMe SSD
+1b96 3734 Western Digital | PC SN730 NVMe SSD
+1bb1 0153 Seagate Technology PLC | Nytro 5x50 NVMe SSD
+1bb1 0155 Seagate Technology PLC | Nytro 5x50 NVMe SSD
+1bb1 5013 Seagate Technology PLC | BarraCuda Q5 NVMe SSD (DRAM-less)
+1bcd 0120 Apacer Technology | NVMe SSD Drive 960GB
+1bcd 0180 Apacer Technology | PB4480 NVMe SSD (DRAM-less)
+1bcd 0310 Apacer Technology | NVMe SSD Drive 480GB
+1bcd 5027 Apacer Technology | AS2280Q4 NVMe SSD
+1bf5 1000 Greenliant | G7200 series U.2 NVMe SSD
+1c44 1100 Enmotus Inc | Fuzedrive NVMe SSD
+1c58 0003 HGST, Inc. | Ultrastar SN100 Series NVMe SSD
+1c58 0023 HGST, Inc. | Ultrastar SN200 Series NVMe SSD
+1c5c 1069 SK hynix | PCB01 NVMe Solid State Drive
+1c5c 1282 SK hynix | PC300 NVMe Solid State Drive 128GB
+1c5c 1283 SK hynix | PC300 NVMe Solid State Drive 256GB
+1c5c 1284 SK hynix | PC300 NVMe Solid State Drive 512GB
+1c5c 1285 SK hynix | PC300 NVMe Solid State Drive 1TB
+1c5c 1327 SK hynix | BC501 NVMe Solid State Drive
+1c5c 1339 SK hynix | BC511 NVMe SSD
+1c5c 1504 SK hynix | PC400 NVMe SSD
+1c5c 1527 SK hynix | PC401 NVMe Solid State Drive 256GB
+1c5c 1627 SK hynix | PC601 NVMe Solid State Drive
+1c5c 1639 SK hynix | PC611 NVMe Solid State Drive
+1c5c 1739 SK hynix | BC701 NVMe Solid State Drive
+1c5c 174a SK hynix | Gold P31/BC711/PC711 NVMe Solid State Drive
+1c5c 1959 SK hynix | Platinum P41/PC801 NVMe Solid State Drive
+1c5c 1969 SK hynix | PC811 NVMe Solid State Drive
+1c5c 1d59 SK hynix | BC901 NVMe Solid State Drive (DRAM-less)
+1c5c 1f69 SK hynix | PVC10 NVMe Solid State Drive (DRAM-less)
+1c5c 2069 SK hynix | PEB110 Series NVMe Solid State Drive
+1c5c 2204 SK hynix | 960GB TLC PCIe Gen3 x4 NVMe M.2 22110
+1c5c 2427 SK hynix | PE6010 NVMe Solid State Drive
+1c5c 2429 SK hynix | PE6011 NVMe Solid State Drive
+1c5c 243b SK hynix | PE6110 NVMe Solid State Drive
+1c5c 2527 SK hynix | PE4010 NVMe Solid State Drive
+1c5c 2839 SK hynix | PE8000 Series NVMe Solid State Drive
+1c5c 2849 SK hynix | PE81x0 U.2/3 NVMe Solid State Drive
+1c5c 284a SK hynix | PE8110 Series NVMe Solid State Drive
+1c5c 2a49 SK hynix | PE9110 Series NVMe Solid State Drive
+1c5c 2a59 SK hynix | PE9010 Series NVMe Solid State Drives
+1c5c 2b59 SK hynix | Px10x0 Series NVMe Solid State Drives
+1c5f 0027 Beijing Memblaze Technology Co. Ltd. | PBlaze7 7A40/7A46 NVMe SSD
+1c5f 003f Beijing Memblaze Technology Co. Ltd. | PBlaze7 7940/7946 NVMe SSD
+1c5f 0540 Beijing Memblaze Technology Co. Ltd. | PBlaze4 NVMe SSD
+1cb0 d000 Shannon Systems | Venice NVMe SSD
+1cc1 1202 ADATA Technology Co., Ltd. | IM2P32A8 NVMe SSD (DRAM-less)
+1cc1 1602 ADATA Technology Co., Ltd. | LEGEND 900 NVMe SSD (DRAM-less)
+1cc1 2263 ADATA Technology Co., Ltd. | XPG SX6000 Lite NVMe SSD (DRAM-less)
+1cc1 32a8 ADATA Technology Co., Ltd. | SM2P32A8 NVMe SSD (DRAM-less)
+1cc1 33f3 ADATA Technology Co., Ltd. | IM2P33F3 NVMe SSD (DRAM-less)
+1cc1 33f4 ADATA Technology Co., Ltd. | IM2P33F4 NVMe SSD (DRAM-less)
+1cc1 33f8 ADATA Technology Co., Ltd. | IM2P33F8 series NVMe SSD (DRAM-less)
+1cc1 413d ADATA Technology Co., Ltd. | SM2P41D3Q NVMe SSD (DRAM-less)
+1cc1 41b8 ADATA Technology Co., Ltd. | IM2P41B8P NVMe SSD
+1cc1 41c3 ADATA Technology Co., Ltd. | SM2P41C3 NVMe SSD (DRAM-less)
+1cc1 41c8 ADATA Technology Co., Ltd. | SM2P41C8 NVMe SSD (DRAM-less)
+1cc1 41d3 ADATA Technology Co., Ltd. | SM2P41D3 NVMe SSD (DRAM-less)
+1cc1 5236 ADATA Technology Co., Ltd. | XPG GAMMIX S70 BLADE NVMe SSD
+1cc1 5350 ADATA Technology Co., Ltd. | XPG GAMMIX S50, S50 Lite NVMe SSD
+1cc1 5370 ADATA Technology Co., Ltd. | GAMMIX S70 BLADE, PS5 PREMIUM NVMe SSD
+1cc1 5762 ADATA Technology Co., Ltd. | FALCON, GAMMIX S41, SPECTRIX S40G NVMe SSD (DRAM-less)
+1cc1 5763 ADATA Technology Co., Ltd. | XPG GAMMIX S5 NVMe SSD (DRAM-less)
+1cc1 5766 ADATA Technology Co., Ltd. | XPG GAMMIXS1 1L, XPG GAMMIX S5, LEGEND 710 / 740, SWORDFISH NVMe SSD (DRAM-less)
+1cc1 5772 ADATA Technology Co., Ltd. | LEGEND 850 LITE NVMe SSD (DRAM-less)
+1cc1 612a ADATA Technology Co., Ltd. | LEGEND 750 NVMe SSD (DRAM-less)
+1cc1 613a ADATA Technology Co., Ltd. | ATOM 50, LEGEND 840 NVMe SSD (DRAM-less)
+1cc1 621a ADATA Technology Co., Ltd. | LEGEND 850 NVMe SSD (DRAM-less)
+1cc1 622a ADATA Technology Co., Ltd. | LEGEND 960 NVMe SSD
+1cc1 623a ADATA Technology Co., Ltd. | LEGEND 710 NVMe SSD (DRAM-less)
+1cc1 624a ADATA Technology Co., Ltd. | LEGEND 700, XPG GAMMIX S20 NVMe SSD (DRAM-less)
+1cc1 625a ADATA Technology Co., Ltd. | LEGEND 850 LITE NVMe SSD (DRAM-less)
+1cc1 627a ADATA Technology Co., Ltd. | LEGEND 800 NVMe SSD (DRAM-less)
+1cc1 628a ADATA Technology Co., Ltd. | LEGEND 800 NVMe SSD (DRAM-less)
+1cc1 631a ADATA Technology Co., Ltd. | LEGEND 970 NVMe SSD
+1cc1 633a ADATA Technology Co., Ltd. | LEGEND 900 NVMe SSD (DRAM-less)
+1cc1 634c ADATA Technology Co., Ltd. | LEGEND 820 NVMe SSD (DRAM-less)
+1cc1 635a ADATA Technology Co., Ltd. | XPG GAMMIX S60 NVMe SSD (DRAM-less)
+1cc1 636a ADATA Technology Co., Ltd. | XPG GAMMIX S55 NVMe SSD (DRAM-less)
+1cc1 641a ADATA Technology Co., Ltd. | LEGEND 970 PRO NVMe SSD
+1cc1 642a ADATA Technology Co., Ltd. | XPG GAMMIX S50 CORE NVMe SSD (DRAM-less)
+1cc1 646a ADATA Technology Co., Ltd. | XPG MARS 980 BLADE NVMe SSD
+1cc1 647a ADATA Technology Co., Ltd. | XPG MARS 980 PRO NVMe SSD
+1cc1 648a ADATA Technology Co., Ltd. | LEGEND 860 NVMe SSD (DRAM-less)
+1cc1 64ba ADATA Technology Co., Ltd. | LEGEND 900 PRO NVMe SSD
+1cc1 a010 ADATA Technology Co., Ltd. | TRUSTA T7P5 NVMe SSD
+1cc1 a120 ADATA Technology Co., Ltd. | TRUSTA T5P4B NVMe SSD
+1cc4 1203 Shenzhen Unionmemory Information System Ltd. | NVMe SSD Controller UHXXXa series
+1cc4 17a9 Shenzhen Unionmemory Information System Ltd. | RPITJ1TBVME2HWD NVMe SSD 1024GB
+1cc4 17aa Shenzhen Unionmemory Information System Ltd. | AH631 PCIe 3.0 NVMe SSD 512GB
+1cc4 17ab Shenzhen Unionmemory Information System Ltd. | AH631 PCIe 3.0 NVMe SSD 256GB
+1cc4 2263 Shenzhen Unionmemory Information System Ltd. | AM611 PCIe 3.0 x2 NVMe SSD 256GB
+1cc4 5008 Shenzhen Unionmemory Information System Ltd. | AM610 PCIe 3.0 x2 NVMe SSD 128GB, 256GB
+1cc4 5012 Shenzhen Unionmemory Information System Ltd. | AH530 PCIe 3.0 NVMe SSD 512GB
+1cc4 5201 Shenzhen Unionmemory Information System Ltd. | AM520 PCIe 3.0 NVMe SSD 128GB
+1cc4 5212 Shenzhen Unionmemory Information System Ltd. | AM521 PCIe 3.0 NVMe SSD 256GB
+1cc4 5414 Shenzhen Unionmemory Information System Ltd. | AM541 PCIe 4.0 NVMe SSD 1024GB
+1cc4 6020 Shenzhen Unionmemory Information System Ltd. | NVMe SSD Controller UM3X1X series
+1cc4 6201 Shenzhen Unionmemory Information System Ltd. | AM620 PCIe 3.0 NVMe SSD 128GB
+1cc4 6202 Shenzhen Unionmemory Information System Ltd. | AM620 PCIe 3.0 NVMe SSD 256GB
+1cc4 6203 Shenzhen Unionmemory Information System Ltd. | AM620 PCIe 3.0 NVMe SSD 512GB
+1cc4 6204 Shenzhen Unionmemory Information System Ltd. | AM620 PCIe 3.0 NVMe SSD 1024GB
+1cc4 6302 Shenzhen Unionmemory Information System Ltd. | AM630 PCIe 4.0 NVMe SSD 256GB
+1cc4 6303 Shenzhen Unionmemory Information System Ltd. | AM630 PCIe 4.0 x4 NVMe SSD Controller
+1cc4 6304 Shenzhen Unionmemory Information System Ltd. | AM630 PCIe 4.0 NVMe SSD 1024GB
+1cc4 634c Shenzhen Unionmemory Information System Ltd. | LEGEND 820 NVMe SSD (DRAM-less)
+1cc4 635a Shenzhen Unionmemory Information System Ltd. | GAMMIX S60 NVMe SSD (DRAM-less)
+1cc4 660b Shenzhen Unionmemory Information System Ltd. | AH660 PCIe 4.0 NVMe SSD 512GB
+1cc4 660c Shenzhen Unionmemory Information System Ltd. | AH660 PCIe 4.0 NVMe SSD
+1cc4 6a01 Shenzhen Unionmemory Information System Ltd. | AM620 PCIe 3.0 NVMe SSD 128GB
+1cc4 6a02 Shenzhen Unionmemory Information System Ltd. | AM6A0 PCIe 4.0 NVMe SSD 256GB
+1cc4 6a03 Shenzhen Unionmemory Information System Ltd. | RPETJ512MKP1QDQ PCIe 4.0 NVMe SSD 512GB (DRAM-less)
+1cc4 6a04 Shenzhen Unionmemory Information System Ltd. | AM6A0 PCIe 4.0 NVMe SSD 1024GB (DRAM-less)
+1cc4 6a13 Shenzhen Unionmemory Information System Ltd. | RPJYJ512MKN1QWQ PCIe 4.0 NVMe SSD 512GB (DRAM-less)
+1cc4 6a14 Shenzhen Unionmemory Information System Ltd. | AM6A1 PCIe 4.0 NVMe SSD 1024GB (DRAM-less)
+1cc4 6b02 Shenzhen Unionmemory Information System Ltd. | AM6B0 PCIe 4.0 NVMe SSD 256GB (DRAM-less)
+1cc4 6b03 Shenzhen Unionmemory Information System Ltd. | RPETJ512MMW1MDQ PCIe 4.0 NVMe SSD 512GB (DRAM-less)
+1cc4 6b04 Shenzhen Unionmemory Information System Ltd. | AM6B0 PCIe 4.0 NVMe SSD
+1cc4 6b13 Shenzhen Unionmemory Information System Ltd. | AM6B1 PCIe 4.0 NVMe SSD 512GB (DRAM-less)
+1cc4 6b14 Shenzhen Unionmemory Information System Ltd. | RPJYJ1T24MLR1HWY PCIe 4.0 NVMe SSD 1024GB (DRAM-less)
+1cc4 6c13 Shenzhen Unionmemory Information System Ltd. | AM6C1 PCIe 4.0 NVMe SSD
+1cc4 6d03 Shenzhen Unionmemory Information System Ltd. | AM6DX PCIe 5.0 NVMe SSD
+1cc4 7030 Shenzhen Unionmemory Information System Ltd. | NVMe SSD Controller UH7X3X series
+1cc4 8030 Shenzhen Unionmemory Information System Ltd. | NVMe SSD Controller UH8X2X/UH7X2X series
+1cc7 0200 Radian Memory Systems Inc. | RMS-200 PCIe NVMe SSD
+1cc7 0250 Radian Memory Systems Inc. | RMS-250 U.2 NVMe SSD
+1cfd 6300 Mangstor | MX6300 series PCIe x8 NVMe SSD
+1d0f 8061 Amazon.com, Inc. | NVMe EBS Controller
+1d0f cd01 Amazon.com, Inc. | NVMe SSD Controller
+1d1d 1f1f CNEX Labs | QEMU NVM Express LightNVM Controller
+1d1d 2807 CNEX Labs | 8800 series NVMe SSD
+1d63 3801 StorArt Technology Co., Ltd | SA3801 PCIe 3.0 x2 NVMe controller
+1d78 1512 DERA Storage | TAI NVMe Controller
+1d78 1513 DERA Storage | DERA MENG NVMe Controller
+1d78 1515 DERA Storage | DERA EMEI NVMe Controller
+1d78 1516 DERA Storage | DERA D8436/D8456 NVMe SSD
+1d79 2262 Transcend Information, Inc. | NVMe PCIe SSD 220S/MTE662T2
+1d79 2263 Transcend Information, Inc. | NVMe PCIe SSD 110S/112S/120S/MTE300S/MTE400S/MTE652T2 (DRAM-less)
+1d79 2264 Transcend Information, Inc. | NVMe PCIe SSD 250H
+1d79 2267 Transcend Information, Inc. | NVMe PCIe SSD 220S/240S/MTE710T
+1d79 2268 Transcend Information, Inc. | NVMe PCIe SSD 245S (DRAM-less)
+1d79 2269 Transcend Information, Inc. | NVMe PCIe SSD 410S (DRAM-less)
+1d79 5766 Transcend Information, Inc. | NVMe PCIe SSD 110Q (DRAM-less)
+1d82 0102 NETINT Technologies Inc. | Codensity D408 PCIe Gen4 NVMe SSD
+1d89 0280 YEESTOR Microelectronics Co., Ltd | PCIe NVMe SSD
+1d89 ef25 YEESTOR Microelectronics Co., Ltd | GDRAMARS GMT1000 NVMe SSD (DRAM-less)
+1d97 0304 Shenzhen Longsys Electronics Co., Ltd. | HIKSEMI FUTURE Lite NVMe SSD
+1d97 1160 Shenzhen Longsys Electronics Co., Ltd. | FORESEE P900 BGA NVMe SSD (DRAM-less)
+1d97 1602 Shenzhen Longsys Electronics Co., Ltd. | Lexar NM790 / Patriot Viper VP4300 Lite NVMe SSD (DRAM-less)
+1d97 1806 Shenzhen Longsys Electronics Co., Ltd. | Lexar NM990 NVMe SSD (DRAM-less)
+1d97 2508 Shenzhen Longsys Electronics Co., Ltd. | Lexar NM1090 PRO NVMe SSD
+1d97 5220 Shenzhen Longsys Electronics Co., Ltd. | FORESEE XP2100 NVMe SSD (DRAM-less)
+1dad 0108 Fungible | FC50, FC100, FC200 DPU NVMeoF Adapters
+1dbb 1021 NGD Systems, Inc. | ICS-8100 NVMe SSD
+1dbe 5208 INNOGRIT Corporation | NVMe SSD Controller IG5208 [Shasta] (DRAM-less)
+1dbe 5216 INNOGRIT Corporation | NVMe SSD Controller IG5216 [Shasta+] (DRAM-less)
+1dbe 5220 INNOGRIT Corporation | NVMe SSD Controller IG5220 [RainierQX] (DRAM-less)
+1dbe 5222 INNOGRIT Corporation | NVMe SSD Controller IG5222 [RainierX] (DRAM-less)
+1dbe 5236 INNOGRIT Corporation | NVMe SSD Controller IG5236 [RainierPC]
+1dbe 5636 INNOGRIT Corporation | NVMe DC SSD IG5636
+1dbe 5638 INNOGRIT Corporation | NVMe DC SSD IG5638
+1dbe 5666 INNOGRIT Corporation | NVMe SSD Controller IG5666
+1dbe 5668 INNOGRIT Corporation | NVMe PCIe 5.0 DC SSD
+1dbe 5669 INNOGRIT Corporation | NVMe SSD Controller IG5669 [Tacoma]
+1dc5 4081 FADU Inc. | FC4121 PCIe 4.0 NVMe controller [DELTA]
+1dc5 5161 FADU Inc. | FC5161 PCIe 5.0 NVMe controller [ECHO]
+1dc5 6150 FADU Inc. | FC3081 PCIe 3.0 NVMe controller [BRAVO]
+1dd4 0010 Swissbit AG | N-10m2 NVMe SSD
+1dd4 0020 Swissbit AG | EN-20 BGA NVMe SSD (DRAM-less)
+1dd4 0030 Swissbit AG | N-30m2 NVMe SSD
+1dd4 0036 Swissbit AG | N-36m2 NVMe SSD
+1dd4 1200 Swissbit AG | D1200 NVMe SSD
+1dd4 3000 Swissbit AG | N3000 NVMe SSD
+1dd4 3002 Swissbit AG | N3002 NVMe SSD
+1dd4 3602 Swissbit AG | N3602 NVMe SSD
+1dd4 4131 Swissbit AG | A1x NVMe SSD Series
+1dd4 4432 Swissbit AG | D2x NVMe SSD Series
+1dd4 5200 Swissbit AG | N5200 NVMe SSD
+1dd8 1005 AMD Pensando Systems | DSC NVMe Controller
+1dd8 1006 AMD Pensando Systems | DSC NVMe Controller VF
+1dee 1202 Biwin Storage Technology Co., Ltd. | HP EX900 Plus NVMe SSD (DRAM-less)
+1dee 1602 Biwin Storage Technology Co., Ltd. | HP FX700 NVMe SSD (DRAM-less)
+1dee 2262 Biwin Storage Technology Co., Ltd. | HP EX950 NVMe SSD
+1dee 2263 Biwin Storage Technology Co., Ltd. | HP EX900 NVMe SSD (DRAM-less)
+1dee 4121 Biwin Storage Technology Co., Ltd. | PCIe 4.0 SP406/416 NVMe SSD
+1dee 5016 Biwin Storage Technology Co., Ltd. | BIWIN NVMe SSD SP509/SP519
+1dee 5161 Biwin Storage Technology Co., Ltd. | BIWIN NVMe SSD SP506/SP516
+1dee 5216 Biwin Storage Technology Co., Ltd. | KingSpec NX series NVMe SSD (DRAM-less)
+1dee 5236 Biwin Storage Technology Co., Ltd. | Acer Predator GM7000 NVMe SSD
+1dee 7700 Biwin Storage Technology Co., Ltd. | BIWIN NVMe SSD SP5 series
+1df5 1202 Shenzhen TIGO Semiconductor | kimtigo NVMe SSD (DRAM-less)
+1df5 2263 Shenzhen TIGO Semiconductor | kimtigo MG931K NVMe SSD (DRAM-less)
+1df8 3000 V&G Information System Co.,Ltd | PC NVMe SSD
+1df8 4000 V&G Information System Co.,Ltd | M.2 NVMe SSD
+1df8 c000 V&G Information System Co.,Ltd | DC NVMe SSD
+1df8 d000 V&G Information System Co.,Ltd | PC NVMe SSD
+1e0f 0001 KIOXIA Corporation | NVMe SSD Controller BG4 (DRAM-less)
+1e0f 0007 KIOXIA Corporation | NVMe SSD Controller Cx6
+1e0f 0008 KIOXIA Corporation | RD500/Exceria Plus/Exceria Plus G2 NVMe SSD
+1e0f 0009 KIOXIA Corporation | NVMe SSD
+1e0f 000c KIOXIA Corporation | NVMe SSD Controller BG5 (DRAM-less)
+1e0f 000d KIOXIA Corporation | NVMe SSD Controller XG7
+1e0f 0010 KIOXIA Corporation | NVMe SSD Controller XG8
+1e0f 0011 KIOXIA Corporation | NVMe SSD Controller CD7
+1e0f 0013 KIOXIA Corporation | NVMe SSD Controller CM7
+1e0f 0014 KIOXIA Corporation | NVMe SSD Controller CM7 EDSFF
+1e0f 0018 KIOXIA Corporation | Exceria Pro NVMe SSD
+1e0f 001a KIOXIA Corporation | NVMe SSD Controller BG6 (DRAM-less)
+1e0f 001b KIOXIA Corporation | NVMe SSD Controller EG6 (DRAM-less)
+1e0f 001e KIOXIA Corporation | NVMe SSD Controller LD2-L
+1e0f 001f KIOXIA Corporation | NVMe SSD Controller CD8
+1e0f 0025 KIOXIA Corporation | NVMe SSD Controller CM7 2.5"
+1e0f 002a KIOXIA Corporation | Exceria Plus G3 NVMe SSD (DRAM-less)
+1e0f 002b KIOXIA Corporation | NVMe SSD Controller CD8P
+1e0f 002c KIOXIA Corporation | NVMe SSD Controller CD8P EDSFF
+1e0f 002e KIOXIA Corporation | NVMe SSD Controller XD8
+1e0f 002f KIOXIA Corporation | NVMe SSD Controller BG7 (DRAM-less)
+1e0f 0030 KIOXIA Corporation | NVMe SSD Controller EG7
+1e0f 0031 KIOXIA Corporation | PCIe 5.0 NVMe SSD Controller XG10
+1e0f 0032 KIOXIA Corporation | PCIe 4.0 NVMe SSD Controller XG10d
+1e0f 0033 KIOXIA Corporation | Exceria Plus G4 NVMe SSD (DRAM-less)
+1e0f 0034 KIOXIA Corporation | CM9-based E3.S NVMe SSD
+1e0f 0035 KIOXIA Corporation | CM9-based U3 NVMe SSD
+1e0f 0036 KIOXIA Corporation | NVMe SSD Controller CD9P U.2
+1e0f 0037 KIOXIA Corporation | NVMe SSD Controller CD9P E3.S
+1e0f 003a KIOXIA Corporation | NVMe SSD Controller BG8 (DRAM-less)
+1e0f 003b KIOXIA Corporation | Exceria Basic NVMe SSD (DRAM-less)
+1e0f 003d KIOXIA Corporation | LC9 E3.L NVMe SSD
+1e0f 003e KIOXIA Corporation | LC9 E3.S NVMe SSD
+1e0f 003f KIOXIA Corporation | LC9 U.2 NVMe SSD
+1e0f 0040 KIOXIA Corporation | Exceria G3 PCIe 5 NVMe SSD (QLC) (DRAM-less)
+1e0f 0042 KIOXIA Corporation | NVMe SSD Controller LD4
+1e3a 2263 Cactus Technologies Limited | 270PM6, 270PM7 series NVMe SSD
+1e3b 0600 DapuStor Corporation | NVMe SSD Controller DP600
+1e3b 0800 DapuStor Corporation | NVMe SSD Controller DP800
+1e3b 1098 DapuStor Corporation | Haishen3 NVMe SSD
+1e3b 1321 DapuStor Corporation | AdgeStor NVMe SSD
+1e3b 1333 DapuStor Corporation | Haishen5 NVMe SSD
+1e3b 50d1 DapuStor Corporation | Flexraid6 NVMeRAID
+1e49 0001 Yangtze Memory Technologies Co.,Ltd | ZHITAI PC005 NVMe SSD
+1e49 0021 Yangtze Memory Technologies Co.,Ltd | ZHITAI TiPro5000 NVMe SSD
+1e49 0081 Yangtze Memory Technologies Co.,Ltd | ZHITAI Ti600 NVMe SSD
+1e49 0090 Yangtze Memory Technologies Co.,Ltd | ZHITAI TiPro9000 NVMe SSD
+1e49 00a1 Yangtze Memory Technologies Co.,Ltd | ZHITAI TiPlus7100s NVMe SSD (DRAM-less)
+1e49 1001 Yangtze Memory Technologies Co.,Ltd | PC005 NVMe SSD
+1e49 1011 Yangtze Memory Technologies Co.,Ltd | PC210 M.2 2280 NVMe SSD
+1e49 1013 Yangtze Memory Technologies Co.,Ltd | PC210 M.2 2242 NVMe SSD
+1e49 1031 Yangtze Memory Technologies Co.,Ltd | PC300 M.2 2280 NVMe SSD (DRAM-less)
+1e49 1033 Yangtze Memory Technologies Co.,Ltd | PC300 M.2 2242 NVMe SSD (DRAM-less)
+1e49 1071 Yangtze Memory Technologies Co.,Ltd | PC411 M.2 2280 NVMe SSD (DRAM-less)
+1e49 1073 Yangtze Memory Technologies Co.,Ltd | PC411 M.2 2242 NVMe SSD (DRAM-less)
+1e49 1078 Yangtze Memory Technologies Co.,Ltd | PE321 U.2 NVMe SSD
+1e49 1081 Yangtze Memory Technologies Co.,Ltd | PC41Q M.2 2280 NVMe SSD (DRAM-less)
+1e49 1083 Yangtze Memory Technologies Co.,Ltd | PC41Q M.2 2242 NVMe SSD (DRAM-less)
+1e49 1101 Yangtze Memory Technologies Co.,Ltd | PC450 M.2 2280 NVMe SSD (DRAM-less)
+1e49 1103 Yangtze Memory Technologies Co.,Ltd | PC450 M.2 2242 NVMe SSD (DRAM-less)
+1e49 1111 Yangtze Memory Technologies Co.,Ltd | PC42Q M.2 2280 NVMe SSD (DRAM-less)
+1e49 1113 Yangtze Memory Technologies Co.,Ltd | PC42Q M.2 2242 NVMe SSD (DRAM-less)
+1e49 1121 Yangtze Memory Technologies Co.,Ltd | PC550 M.2 2280 NVMe SSD
+1e49 1123 Yangtze Memory Technologies Co.,Ltd | PC550 M.2 2242 NVMe SSD
+1e49 1a28 Yangtze Memory Technologies Co.,Ltd | PE511 U.2 NVMe SSD
+1e4b 1001 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1001
+1e4b 1002 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1002 (DRAM-less)
+1e4b 1003 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1003
+1e4b 1201 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1201
+1e4b 1202 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1202 (DRAM-less)
+1e4b 1601 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1601
+1e4b 1602 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1602 (DRAM-less)
+1e4b 1608 MAXIO Technology (Hangzhou) Ltd. | NVMe SSD Controller MAP1608 (DRAM-less)
+1e68 8111 Jiangsu Xinsheng Intelligent Technology Co., Ltd | EP2000Pro PCIe 3 NVMe SSD (DRAM-less)
+1e7f 6002 Jiangsu Huacun Elec. Tech. Co., Ltd. | MMY MMSP350 PCIe 3 NVMe SSD (DRAM-less)
+1e7f 6003 Jiangsu Huacun Elec. Tech. Co., Ltd. | MMY HC512GP3KH2T PCIe 3 NVMe SSD (DRAM-less)
+1e81 1203 Ramaxel Technology(Shenzhen) Limited | NVMe SSD Controller UHXXXa series
+1e81 6206 Ramaxel Technology(Shenzhen) Limited | AM620 NVMe SSD
+1e81 6a02 Ramaxel Technology(Shenzhen) Limited | AM6A0 NVMe SSD (DRAM-less)
+1e81 6c14 Ramaxel Technology(Shenzhen) Limited | RPEYJ1T24 NVMe SSD (DRAM-less)
+1e95 1000 Solid State Storage Technology Corporation | XA1 Series NVMe SSD M.2 (DRAM-less)
+1e95 1001 Solid State Storage Technology Corporation | CA6-8D512 NVMe SSD M.2
+1e95 1002 Solid State Storage Technology Corporation | NVMe SSD [3DNAND] 2.5" U.2 (LJ1)
+1e95 1003 Solid State Storage Technology Corporation | CLR-8W512 NVMe SSD M.2 (DRAM-less)
+1e95 1005 Solid State Storage Technology Corporation | PLEXTOR M10P(GN) NVMe SSD M.2
+1e95 1006 Solid State Storage Technology Corporation | CA8 Series NVMe SSD M.2
+1e95 1007 Solid State Storage Technology Corporation | CL4 Series NVMe SSD M.2 (DRAM-less)
+1e95 1008 Solid State Storage Technology Corporation | CL5-8D512 NVMe SSD M.2 (DRAM-less)
+1e95 100b Solid State Storage Technology Corporation | XB2-311024 NVMe SSD M.2 (DRAM-less)
+1e95 100c Solid State Storage Technology Corporation | CL6 Series NVMe SSD M.2 (DRAM-less)
+1e95 100d Solid State Storage Technology Corporation | PJ1 Series NVMe SSD
+1e95 100f Solid State Storage Technology Corporation | EJ5-2W3840 NVMe SSD U.2
+1e95 1010 Solid State Storage Technology Corporation | CX3 Series NVMe SSD
+1e95 3500 Solid State Storage Technology Corporation | CA5-8D256 NVMe SSD M.2
+1e95 35f1 Solid State Storage Technology Corporation | PLEXTOR M9PGN Plus NVMe SSD M.2
+1e95 9100 Solid State Storage Technology Corporation | CL1-3D256-Q11 NVMe SSD M.2
+1eab 300a Hefei DATANG Storage Technology Co.,LTD. | NVMe SSD Controller 300A
+1eab 300b Hefei DATANG Storage Technology Co.,LTD. | NVMe SSD Controller 300B (DRAM-less)
+1eb0 1901 Shenzhen Electrical Appliances CO. | NVMe SSD Controller (DRAM-less)
+1ed0 2283 Hosin Global Electronics | Patriot P300 NVMe SSD (DRAM-less)
+1ee1 0050 Suzhou Kuhan Information Technologies | Aurora NVMe SSD Controller
+1ee4 1180 PETAIO INC | PETA8118 NVMe SSD Series
+1ee4 1181 PETAIO INC | PETA8118 NVMe E1S Series
+1ee4 1182 PETAIO INC | PETA8118 NVMe M2 Series
+1f03 1202 Shenzhen Shichuangyi Electronics Co., Ltd | MAP1202-Based NVMe SSD (DRAM-less)
+1f03 1608 Shenzhen Shichuangyi Electronics Co., Ltd | SCY C5000 NVMe SSD (DRAM-less)
+1f03 2263 Shenzhen Shichuangyi Electronics Co., Ltd | SM2263XT-Based NVMe SSD (DRAM-less)
+1f03 2268 Shenzhen Shichuangyi Electronics Co., Ltd | SM2268XT-Based NVMe SSD (DRAM-less)
+1f03 2269 Shenzhen Shichuangyi Electronics Co., Ltd | SM2269XT-Based NVMe SSD (DRAM-less)
+1f03 5216 Shenzhen Shichuangyi Electronics Co., Ltd | IG5216-based NVMe SSD (DRAM-less)
+1f03 5220 Shenzhen Shichuangyi Electronics Co., Ltd | IG5220-Based NVMe SSD
+1f03 5236 Shenzhen Shichuangyi Electronics Co., Ltd | IG5236-Based NVMe SSD
+1f03 5636 Shenzhen Shichuangyi Electronics Co., Ltd | IG5636-Based NVMe SSD
+1f24 1058 xFusion Digital Technologies Co., Ltd. | EP500/EP600 NVMe SSD
+1f2f 1513 China Mobile (Hangzhou) Information Technology Co.Ltd. | DERA MENG NVMe Controller
+1f31 4512 Nextorage | NE1N NVMe SSD
+1f31 451b Nextorage | NN4LE NVMe SSD (DRAM-less)
+1f31 4622 Nextorage | NEM-PAC NVMe SSD (DRAM-less)
+1f32 ed55 Wuhan YuXin Semiconductor Co., Ltd. | U800G NVMe SSD
+1f40 0001 Netac Technology Co.,Ltd | PCIe 4 NVMe SSD (DRAM-less)
+1f40 1202 Netac Technology Co.,Ltd | NV3000 NVMe SSD (DRAM-less)
+1f40 1602 Netac Technology Co.,Ltd | NV7000-t NVMe SSD (DRAM-less)
+1f40 1f40 Netac Technology Co.,Ltd | PCIe 4 NVMe SSD (DRAM-less)
+1f40 2263 Netac Technology Co.,Ltd | PCIe 3 SM based NVMe SSD (DRAM-less)
+1f40 5216 Netac Technology Co.,Ltd | PCIe 3 NVMe SSD (DRAM-less)
+1f40 5236 Netac Technology Co.,Ltd | NV7000 NVMe SSD
+1f40 5765 Netac Technology Co.,Ltd | PCIe 3 NVMe SSD (DRAM-less)
+1f47 1005 YUSUR Technology | CONFLUX-2200P NVMe Controller
+1f47 1105 YUSUR Technology | CONFLUX-2200P NVMe Controller [Virtual Function]
+1f47 5003 YUSUR Technology | CONFLUX-2200P NVMe Controller
+1f47 5004 YUSUR Technology | CONFLUX-2200P NVMe Controller [Virtual Function]
+1f8c 8008 Exascend,INC. | SM8008 NVMe SSD [Px5 Series SSD]
+1f8c 8366 Exascend,INC. | SM8366 NVMe SSD [PD5 Series SSD]
+1f99 1202 Shenzhen Techwinsemi Technology Co., Ltd. | TE3420 series / Patriot P320 M.2 NVMe SSD (DRAM-less)
+1f99 2269 Shenzhen Techwinsemi Technology Co., Ltd. | XE4403 Series NVMe PCIe Gen4x4 SSD
+1f99 3101 Shenzhen Techwinsemi Technology Co., Ltd. | EP1021 Series M.2 2242 NVMe PCIe Gen3x4 SSD
+1f99 3105 Shenzhen Techwinsemi Technology Co., Ltd. | EP2021 Series M.2 2242 NVMe PCIe Gen4x4 SSD
+1f99 3201 Shenzhen Techwinsemi Technology Co., Ltd. | EP1021 Series M.2 2280 NVMe PCIe Gen3x4 SSD
+1f99 3202 Shenzhen Techwinsemi Technology Co., Ltd. | EP1031 Series M.2 2280 NVMe PCIe Gen3x4 SSD
+1f99 3205 Shenzhen Techwinsemi Technology Co., Ltd. | EP2021 Series M.2 2280 NVMe PCIe Gen4x4 SSD
+1f99 3206 Shenzhen Techwinsemi Technology Co., Ltd. | EP2031 Series M.2 2280 NVMe PCIe Gen4x4 SSD
+1f99 3261 Shenzhen Techwinsemi Technology Co., Ltd. | DP1421 Series M.2 2280 NVMe PCIe Gen3x4 SSD
+1f99 6100 Shenzhen Techwinsemi Technology Co., Ltd. | TE3420 Series NVMe PCIe Gen3x4 SSD
+1f99 6101 Shenzhen Techwinsemi Technology Co., Ltd. | XE3420 Series NVMe PCIe Gen3x4 SSD
+1f99 6102 Shenzhen Techwinsemi Technology Co., Ltd. | TE4407 Series NVMe PCIe Gen4x4 SSD
+1f99 6103 Shenzhen Techwinsemi Technology Co., Ltd. | XE4407 Series NVMe PCIe Gen4x4 SSD
+1f99 6104 Shenzhen Techwinsemi Technology Co., Ltd. | TE4408 Series NVMe PCIe Gen4x4 SSD
+1f99 6105 Shenzhen Techwinsemi Technology Co., Ltd. | XE4408 Series NVMe PCIe Gen4x4 SSD
+1f99 6106 Shenzhen Techwinsemi Technology Co., Ltd. | TE4402 Series NVMe PCIe Gen4x4 SSD
+1f99 6107 Shenzhen Techwinsemi Technology Co., Ltd. | XE4402 Series NVMe PCIe Gen4x4 SSD
+1f99 6108 Shenzhen Techwinsemi Technology Co., Ltd. | TE4405 Series NVMe PCIe Gen4x4 SSD
+1f99 6109 Shenzhen Techwinsemi Technology Co., Ltd. | XE4405 Series NVMe PCIe Gen4x4 SSD
+1f99 610a Shenzhen Techwinsemi Technology Co., Ltd. | TE4406 Series NVMe PCIe Gen4x4 SSD
+1f99 610b Shenzhen Techwinsemi Technology Co., Ltd. | XE4406 Series NVMe PCIe Gen4x4 SSD
+1f99 610c Shenzhen Techwinsemi Technology Co., Ltd. | TE3410 Series NVMe PCIe Gen3x4 SSD
+1f99 610d Shenzhen Techwinsemi Technology Co., Ltd. | TE4403 Series NVMe PCIe Gen4x4 SSD
+1f99 610e Shenzhen Techwinsemi Technology Co., Ltd. | TE5440 Series NVMe PCIe Gen5x4 SSD
+1f99 610f Shenzhen Techwinsemi Technology Co., Ltd. | TE5441 Series NVMe PCIe Gen5x4 SSD
+1f99 6110 Shenzhen Techwinsemi Technology Co., Ltd. | TE5480 Series NVMe PCIe Gen5x4 SSD
+1f99 6111 Shenzhen Techwinsemi Technology Co., Ltd. | TE5481 Series NVMe PCIe Gen5x4 SSD
+1fe4 1600 HippStor Technology | HP600 Series NVMe SSD
+2061 4200 Unis Flash Memory | E4200 NVMe Controller
+2061 5100 Unis Flash Memory | E5100 NVMe Controller
+2061 5200 Unis Flash Memory | E5200 NVMe Controller
+2061 5300 Unis Flash Memory | E5300 NVMe Controller
+2063 1406 Hubei Yangtze Mason Semiconductor Technology Co., Ltd. | ME7000 NVMe SSD
+2063 36b0 Hubei Yangtze Mason Semiconductor Technology Co., Ltd. | ME14000 NVMe SSD
+20a8 1202 Rayson HI-TECH(SZ) Co., Ltd. | RS512GSSD510 PCIe 3 NVMe SSD (DRAM-less)
+20b4 a20c Genstoraige Technology Co., Ltd. | PT200A PCIe 5.0 NVMe SSD
+20b4 c25c Genstoraige Technology Co., Ltd. | MQ205 PCIe 5.0 NVMe SSD
+20b4 d15b Genstoraige Technology Co., Ltd. | PT150 PCIe 4.0 NVMe SSD
+20b4 d20c Genstoraige Technology Co., Ltd. | PT200 PCIe 5.0 NVMe SSD
+20b4 d25c Genstoraige Technology Co., Ltd. | PT205 PCIe 5.0 NVMe SSD
+20b4 d28c Genstoraige Technology Co., Ltd. | PT208 PCIe 5.0 NVMe SSD
+20d0 2001 Telin Semiconductor (Wuhan) Co., Ltd. | PACIFIC-S1 NVMe SSD
+20dc 5000 Sharetronic Data Technology Co., Ltd. | E5000 U.2 15mm 3.84TB NVMe SSD
+20dc 5101 Sharetronic Data Technology Co., Ltd. | E5000 U.2 15mm 7.68TB NVMe SSD
+22db 1200 Missing Link Electronics, Inc. | NVMe Streamer EP ERD
+2646 2262 Kingston Technology Company, Inc. | KC2000/KC2500 NVMe SSD [SM2262EN]
+2646 2263 Kingston Technology Company, Inc. | A2000 NVMe SSD [SM2263EN]
+2646 5008 Kingston Technology Company, Inc. | A1000/U-SNS8154P3 x2 NVMe SSD [E8]
+2646 500a Kingston Technology Company, Inc. | DC1000B NVMe SSD [E12DC]
+2646 500b Kingston Technology Company, Inc. | DC1000M NVMe SSD [SM2270]
+2646 500c Kingston Technology Company, Inc. | OM8PCP3 PCIe 3 NVMe SSD (DRAM-less)
+2646 500d Kingston Technology Company, Inc. | OM3PDP3 PCIe 3 NVMe SSD (DRAM-less)
+2646 500e Kingston Technology Company, Inc. | NV1 NVMe SSD [E13T] (DRAM-less)
+2646 500f Kingston Technology Company, Inc. | NV1 NVMe SSD [SM2263XT] (DRAM-less)
+2646 5010 Kingston Technology Company, Inc. | OM8SBP NVMe PCIe SSD (DRAM-less)
+2646 5012 Kingston Technology Company, Inc. | DC1500M NVMe SSD [SM2270]
+2646 5013 Kingston Technology Company, Inc. | KC3000/FURY Renegade NVMe SSD [E18]
+2646 5014 Kingston Technology Company, Inc. | OM8SEP4 PCIe 4 NVMe SSD (TLC) (DRAM-less)
+2646 5016 Kingston Technology Company, Inc. | OM3PGP4 PCIe 4 NVMe SSD (DRAM-less)
+2646 5017 Kingston Technology Company, Inc. | NV2 NVMe SSD [SM2267XT] (DRAM-less)
+2646 5018 Kingston Technology Company, Inc. | OM8SFP4 PCIe 4 NVMe SSD (DRAM-less)
+2646 5019 Kingston Technology Company, Inc. | NV2 NVMe SSD [E21T] (DRAM-less)
+2646 501a Kingston Technology Company, Inc. | OM8PGP4 PCIe 4 NVMe SSD (TLC) (DRAM-less)
+2646 501b Kingston Technology Company, Inc. | OM8PGP4 NVMe PCIe SSD (DRAM-less)
+2646 501c Kingston Technology Company, Inc. | NV2 NVMe SSD [E19T] (DRAM-less)
+2646 501d Kingston Technology Company, Inc. | NV2 NVMe SSD [TC2200] (DRAM-less)
+2646 501e Kingston Technology Company, Inc. | OM3PGP4 NVMe SSD (DRAM-less)
+2646 501f Kingston Technology Company, Inc. | FURY Renegade NVMe SSD [E18] (Heatsink)
+2646 5021 Kingston Technology Company, Inc. | OM8SEP4 PCIe 4 NVMe SSD (QLC) (DRAM-less)
+2646 5022 Kingston Technology Company, Inc. | OM8PGP4 PCIe 4 NVMe SSD (QLC) (DRAM-less)
+2646 5023 Kingston Technology Company, Inc. | NV2 NVMe SSD [SM2269XT] (DRAM-less)
+2646 5024 Kingston Technology Company, Inc. | DC2000B NVMe SSD [E18DC]
+2646 5025 Kingston Technology Company, Inc. | NV3 NVMe SSD [TC2201] (DRAM-less)
+2646 5026 Kingston Technology Company, Inc. | NV3 NVMe SSD [E21T] (DRAM-less)
+2646 5027 Kingston Technology Company, Inc. | NV3 NVMe SSD [E27T] (DRAM-less)
+2646 5028 Kingston Technology Company, Inc. | NV3 NVMe SSD [SM2268XT2] (DRAM-less)
+2646 5029 Kingston Technology Company, Inc. | OM8SGP4 PCIe 4 NVMe SSD (TLC) (DRAM-less)
+2646 502a Kingston Technology Company, Inc. | FURY Renegade G5 NVMe SSD [SM2508]
+2646 502b Kingston Technology Company, Inc. | NV3 NVMe SSD [E29T] (DRAM-less)
+2646 502c Kingston Technology Company, Inc. | DC3000ME NVMe SSD [SC5]
+2646 502d Kingston Technology Company, Inc. | OM8TAP4 PCIe 4 NVMe SSD (QLC) (DRAM-less)
+2646 502f Kingston Technology Company, Inc. | OM3SGP4 PCIe 4 NVMe SSD (TLC)
+2646 5030 Kingston Technology Company, Inc. | NV3 2230 NVMe SSD [SM2268XT2] (DRAM-less)
+2646 5034 Kingston Technology Company, Inc. | NV3 NVMe SSD [E33T] (DRAM-less)
+4e58 0001 Nutanix, Inc. | Virtual NVMe Controller
+7526 0083 HongQin (Beijing) Technology Co., Ltd. | HQ SSD 2TB M.2 NVMe
+8080 4016 Chengdu Storeswift Technology Co., Ltd. | CX4016A NVMe SSD Controller
+8086 0a54 Intel Corporation | NVMe Datacenter SSD [3DNAND, Beta Rock Controller]
+8086 0a55 Intel Corporation | NVMe DC SSD [3DNAND, Beta Rock Controller]
+8086 0b60 Intel Corporation | NVMe DC SSD [3DNAND, Sentinel Rock Controller]
+8086 11eb Intel Corporation | Simics NVMe Controller
+8086 1457 Intel Corporation | NVMe Data Path Function
+8086 201d Intel Corporation | Volume Management Device NVMe RAID Controller
+8086 2522 Intel Corporation | NVMe Optane Memory Series
+8086 2701 Intel Corporation | NVMe Datacenter SSD [Optane]
+8086 4041 Intel Corporation | NVMe Datacenter SSD [Optane]
+8086 4140 Intel Corporation | NVMe Datacenter SSD [Optane]
+8086 467f Intel Corporation | Volume Management Device NVMe RAID Controller
+8086 4c3d Intel Corporation | Volume Management Device NVMe RAID Controller
+8086 5845 Intel Corporation | QEMU NVM Express Controller
+8086 9a0b Intel Corporation | Volume Management Device NVMe RAID Controller
+9d32 0000 Beijing Starblaze Technology Co. Ltd. | STAR1000 PCIe NVMe SSD Controller
+9d32 1000 Beijing Starblaze Technology Co. Ltd. | STAR1000 PCIe NVMe SSD Controller
+9d32 1001 Beijing Starblaze Technology Co. Ltd. | STAR1000P PCIe NVMe SSD Controller
+9d32 1201 Beijing Starblaze Technology Co. Ltd. | STAR1200C NVMe SSD
+9d32 1202 Beijing Starblaze Technology Co. Ltd. | STAR1200I NVMe SSD
+9d32 1203 Beijing Starblaze Technology Co. Ltd. | STAR1200L NVMe SSD
+9d32 1204 Beijing Starblaze Technology Co. Ltd. | STAR1200E NVMe SSD
+9d32 1500 Beijing Starblaze Technology Co. Ltd. | STAR1500 PCIe NVMe SSD Controller
+9d32 1501 Beijing Starblaze Technology Co. Ltd. | STAR1500C NVMe SSD
+9d32 1502 Beijing Starblaze Technology Co. Ltd. | STAR1500E NVMe SSD
+9d32 1504 Beijing Starblaze Technology Co. Ltd. | STAR1500L NVMe SSD
+9d32 1505 Beijing Starblaze Technology Co. Ltd. | STAR1500K NVMe SSD
+9d32 1516 Beijing Starblaze Technology Co. Ltd. | STAR1516 PCIe NVMe SSD Controller
+9d32 2000 Beijing Starblaze Technology Co. Ltd. | STAR2000 NVMe Controller
+9d32 2001 Beijing Starblaze Technology Co. Ltd. | STAR2000E NVMe SSD
+9d32 2002 Beijing Starblaze Technology Co. Ltd. | STAR2000C NVMe SSD
+9d32 2003 Beijing Starblaze Technology Co. Ltd. | STAR2000L NVMe SSD
+9d32 2008 Beijing Starblaze Technology Co. Ltd. | STAR2008 PCIE NVMe SSD Controller
+9d32 2010 Beijing Starblaze Technology Co. Ltd. | STAR2010 PCIE NVMe Secure SSD Controller
+9d32 bb5b Beijing Starblaze Technology Co. Ltd. | Asgard AN3+ NVMe SSD
+9d32 fc22 Beijing Starblaze Technology Co. Ltd. | Asgard AN3+ NVMe SSD
+c0a9 2263 Micron/Crucial Technology | P1 NVMe PCIe SSD[Frampton]
+c0a9 5403 Micron/Crucial Technology | P1 NVMe PCIe SSD[Frampton2]
+c0a9 5407 Micron/Crucial Technology | P5 Plus NVMe PCIe SSD
+c0a9 540a Micron/Crucial Technology | P2 [Nick P2] / P3 / P3 Plus NVMe PCIe SSD (DRAM-less)
+c0a9 5412 Micron/Crucial Technology | P5 NVMe PCIe SSD[SlashP5]
+c0a9 5415 Micron/Crucial Technology | T500 NVMe PCIe SSD
+c0a9 5419 Micron/Crucial Technology | T700 NVMe PCIe SSD
+c0a9 5420 Micron/Crucial Technology | P3 NVMe PCIe SSD (DRAM-less)
+c0a9 5421 Micron/Crucial Technology | P3 Plus NVMe PCIe SSD (DRAM-less)
+c0a9 5426 Micron/Crucial Technology | P310 M.2 2230/2280 NVMe PCIe SSD (DRAM-less)
+c0a9 5427 Micron/Crucial Technology | P310 NVMe PCIe SSD (DRAM-less)
+c0a9 5428 Micron/Crucial Technology | T710 NVMe PCIe SSD
+c0a9 5429 Micron/Crucial Technology | P310 NVMe PCIe SSD (DRAM-less)
+c0a9 542b Micron/Crucial Technology | T705 NVMe PCIe SSD
+c0a9 560a Micron/Crucial Technology | P510 NVMe PCIe SSD (DRAM-less)
+c0a9 560b Micron/Crucial Technology | E100 NVMe PCIe SSD (DRAM-less)
+d063 1500 SolidRun | Emulated NVMe
+fe19 0001 TenaFe, Inc. | TC2200/TC2201 NVMe Controller (DRAM-less)

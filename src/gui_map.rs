@@ -11,6 +11,7 @@ use egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum State {
     Untested,
+    Read,
     Verified,
     Written,
     Changed,
@@ -20,12 +21,13 @@ pub enum State {
     Unreadable,
 }
 
-const ALL: [State; 8] = [State::Untested, State::Written, State::Verified, State::Changed, State::Stale, State::Aliased, State::Corrupted, State::Unreadable];
+const ALL: [State; 9] = [State::Untested, State::Read, State::Written, State::Verified, State::Changed, State::Stale, State::Aliased, State::Corrupted, State::Unreadable];
 
 impl State {
     fn color(self) -> Color32 {
         match self {
             State::Untested => Color32::from_rgb(0x36, 0x3a, 0x40),
+            State::Read => Color32::from_rgb(0x4f, 0xa8, 0xa0),
             State::Written => Color32::from_rgb(0x4f, 0x7f, 0xb8),
             State::Verified => Color32::from_rgb(0x4f, 0xa8, 0x77),
             State::Changed => Color32::from_rgb(0xd8, 0xc4, 0x4a),
@@ -38,6 +40,7 @@ impl State {
     fn short(self) -> &'static str {
         match self {
             State::Untested => "Untested",
+            State::Read => "Read",
             State::Written => "Written",
             State::Verified => "Verified",
             State::Changed => "Slightly changed",
@@ -50,6 +53,7 @@ impl State {
     fn name(self) -> &'static str {
         match self {
             State::Untested => "Untested",
+            State::Read => "Read, contents not verified",
             State::Written => "Written, not yet verified",
             State::Verified => "Verified",
             State::Changed => "Slightly changed",
@@ -128,14 +132,18 @@ fn curve_points(c: &Curve) -> impl Iterator<Item = (u64, f64)> + '_ {
 }
 
 /// Cells for a running job, from the live status and the speed curves seen so far.
-pub fn live(s: &Live, curves: &[Curve]) -> Option<Vec<Cell>> {
+pub fn live(s: &Live, curves: &[Curve], read_check: bool) -> Option<Vec<Cell>> {
     if s.total < 64 << 20 {
         return None;
     }
     let span = s.base + s.total;
     let mut cells = grid(span);
     let at = s.base + s.done;
-    if is_read(&s.phase) {
+    if read_check {
+        for c in cells.iter_mut().filter(|c| c.end <= at) {
+            c.state = State::Read;
+        }
+    } else if is_read(&s.phase) {
         paint(&mut cells, 0, span, State::Written, None);
         paint(&mut cells, 0, at, State::Verified, None);
         // Verified sorts below Written so that bad news wins; here it replaces it.
@@ -204,7 +212,9 @@ pub fn from_report(r: &Report) -> Option<Vec<Cell>> {
     }
     if let Some(sc) = &r.scan {
         let mut cells = grid(sc.size);
-        paint(&mut cells, 0, sc.stats.bytes, State::Verified, None);
+        for c in cells.iter_mut().filter(|c| c.end <= sc.scanned.max(sc.stats.bytes)) {
+            c.state = State::Read;
+        }
         for b in &sc.bad_ranges {
             paint(&mut cells, b.start, b.end, State::Unreadable, Some("unreadable"));
         }
@@ -239,7 +249,7 @@ pub fn show(ui: &mut egui::Ui, cells: &[Cell], title: &str) {
     let span = cells.last().map(|c| c.end).unwrap_or(0).saturating_sub(cells.first().map(|c| c.start).unwrap_or(0));
     let (head, _) = ui.allocate_exact_size(vec2(MAP_W, 16.0), Sense::hover());
     k::paint_medium(ui.painter(), head.left_center(), egui::Align2::LEFT_CENTER, title, 12.0, k::TEXT3);
-    let scale = format!("{} cells · {} each", cells.len(), size(span / cells.len().max(1) as u64));
+    let scale = format!("{} cells, {} per cell", cells.len(), size(span / cells.len().max(1) as u64));
     k::paint_text(ui.painter(), head.right_center(), egui::Align2::RIGHT_CENTER, &scale, 11.0, k::TEXT3);
 
     let rows = cells.len().div_ceil(COLS).max(ROWS);
@@ -259,7 +269,7 @@ pub fn show(ui: &mut egui::Ui, cells: &[Cell], title: &str) {
     }
 
     egui::Grid::new(ui.id().with("legend")).num_columns(4).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
-        for (n, st) in ALL.iter().enumerate() {
+        for (n, st) in ALL.iter().filter(|st| **st == State::Untested || cells.iter().any(|c| c.state == **st)).enumerate() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
@@ -284,7 +294,7 @@ fn tooltip(ui: &mut egui::Ui, c: &Cell) {
         ui.label(k::text(c.state.name(), 12.0, k::TEXT));
     });
     let speed = match (c.read, c.write) {
-        (Some(r), Some(w)) => format!("Read {r:.1} MB/s · write {w:.1} MB/s"),
+        (Some(r), Some(w)) => format!("Read {r:.1} MB/s, write {w:.1} MB/s"),
         (Some(r), None) => format!("Read {r:.1} MB/s"),
         (None, Some(w)) => format!("Write {w:.1} MB/s"),
         _ => String::new(),
@@ -414,6 +424,20 @@ pub fn capacity(ui: &mut egui::Ui, real: u64, claimed: u64, w: f32) {
 #[cfg(test)]
 mod tests {
     use super::smooth;
+
+    #[test]
+    fn read_checks_never_mark_data_written_or_verified() {
+        use super::*;
+        let status = Live { phase: "Scanning (read-only)".into(), total: 128 << 20, done: 64 << 20, marks: vec![(0, 4096, "unreadable".into())], ..Default::default() };
+        let cells = live(&status, &[], true).unwrap();
+        assert_eq!(cells[0].state, State::Unreadable);
+        assert_eq!(cells[1].state, State::Read);
+        assert_eq!(cells.last().unwrap().state, State::Untested);
+        assert!(!cells.iter().any(|c| matches!(c.state, State::Written | State::Verified)));
+        let verification = live(&Live { marks: vec![], ..status }, &[], false).unwrap();
+        assert_eq!(verification[0].state, State::Verified);
+        assert_eq!(verification.last().unwrap().state, State::Written);
+    }
 
     #[test]
     fn slice_speed_is_bytes_over_time() {

@@ -2,7 +2,7 @@
 //! guard; raw disk access (O_DIRECT, O_EXCL); free-space mapping (fallocate +
 //! FIEMAP); repartitioning with sfdisk and mkfs.
 
-use super::{DiskInfo, UsbInfo, VolumeInfo, run, sniff_fs, statvfs};
+use super::{CardInfo, DiskInfo, UsbInfo, VolumeInfo, run, sniff_fs, statvfs};
 use crate::dev::{ALIGN, Dev, direct, pread, pwrite};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -51,10 +51,12 @@ pub fn give_to_user(p: &Path) {
 
 /// Open with the desktop's default app; not as root (browsers refuse or misbehave),
 /// the GUI lists the saved files anyway.
-pub fn open_file(p: &Path) {
-    if !is_admin() {
-        let _ = Command::new("xdg-open").arg(p).spawn();
+pub fn open_file(p: &Path) -> io::Result<()> {
+    std::fs::metadata(p)?;
+    if is_admin() {
+        return Err(io::Error::other("Cannot open desktop apps as root. Open the saved path from your desktop session."));
     }
+    Command::new("xdg-open").arg(std::path::absolute(p)?).spawn().map(|_| ())
 }
 
 /// Start this exe's GUI as root through pkexec (polkit asks for the password). The
@@ -157,7 +159,7 @@ fn disks_of_block(majmin: (u64, u64)) -> io::Result<Vec<String>> {
         }
         return Ok(out);
     }
-    let slaves: Vec<_> = std::fs::read_dir(dir.join("slaves")).map(|d| d.flatten().collect()).unwrap_or_default();
+    let slaves: Vec<_> = std::fs::read_dir(dir.join("slaves"))?.collect::<io::Result<_>>()?;
     if slaves.is_empty() {
         // A real disk has a device link; zram/ram are memory. Anything else without
         // slaves (bcache, drbd, ...) may hide a disk we can't see: fail closed.
@@ -168,9 +170,11 @@ fn disks_of_block(majmin: (u64, u64)) -> io::Result<Vec<String>> {
     }
     let mut out = vec![];
     for s in slaves {
-        let dev = read(s.path().join("dev"));
-        let (a, b) = dev.split_once(':').ok_or_else(|| io::Error::other("bad slave device"))?;
-        out.extend(disks_of_block((a.parse().unwrap_or(0), b.parse().unwrap_or(0)))?);
+        let dev = std::fs::read_to_string(s.path().join("dev"))?;
+        let (a, b) = dev.trim().split_once(':').ok_or_else(|| io::Error::other("bad slave device"))?;
+        let a = a.parse().map_err(|_| io::Error::other("bad slave device major"))?;
+        let b = b.parse().map_err(|_| io::Error::other("bad slave device minor"))?;
+        out.extend(disks_of_block((a, b))?);
     }
     Ok(out)
 }
@@ -193,13 +197,19 @@ fn disks_of_mount(m: &Mount) -> io::Result<Vec<String>> {
     // mountinfo names one device of a multi-device btrfs; sysfs lists all of them.
     if m.fstype == "btrfs" {
         let uuid = majmin_of_dev(&m.source).map(|(a, b)| udev(&format!("{a}:{b}"))).and_then(|u| u.get("ID_FS_UUID").cloned());
-        if let Some(uuid) = uuid {
-            for e in std::fs::read_dir(format!("/sys/fs/btrfs/{uuid}/devices")).map(|d| d.flatten().collect::<Vec<_>>()).unwrap_or_default() {
-                let dev = read(e.path().join("dev"));
-                if let Some((a, b)) = dev.split_once(':') {
-                    disks.extend(disks_of_block((a.parse().unwrap_or(0), b.parse().unwrap_or(0)))?);
-                }
-            }
+        let uuid = uuid.filter(|u| !u.is_empty() && u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+            .ok_or_else(|| io::Error::other(format!("{}: cannot identify all Btrfs backing devices", m.point)))?;
+        let mut members = 0;
+        for e in std::fs::read_dir(format!("/sys/fs/btrfs/{uuid}/devices"))? {
+            let dev = std::fs::read_to_string(e?.path().join("dev"))?;
+            let (a, b) = dev.trim().split_once(':').ok_or_else(|| io::Error::other("bad Btrfs device number"))?;
+            let a = a.parse().map_err(|_| io::Error::other("bad Btrfs device major"))?;
+            let b = b.parse().map_err(|_| io::Error::other("bad Btrfs device minor"))?;
+            disks.extend(disks_of_block((a, b))?);
+            members += 1;
+        }
+        if members == 0 {
+            return Err(io::Error::other(format!("{}: Btrfs backing device list is empty", m.point)));
         }
     }
     disks.sort();
@@ -375,6 +385,44 @@ fn udev(majmin: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Vendor and product names from the system's usb.ids, or else from udev's hwdb
+/// copy of it (Debian ships only the hwdb). Empty when neither knows the ID.
+fn usb_db_names(vid: &str, pid: &str, majmin: &str) -> (String, String) {
+    static IDS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ids = IDS.get_or_init(|| {
+        ["/usr/share/hwdata/usb.ids", "/usr/share/misc/usb.ids", "/usr/share/usb.ids", "/var/lib/usbutils/usb.ids"].iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_default()
+    });
+    if let Some(n) = crate::ids::usb_ids_lookup(ids, vid, pid) {
+        return n;
+    }
+    let u: BTreeMap<String, String> = read(format!("/run/udev/data/c{majmin}")).lines().filter_map(|l| l.strip_prefix("E:")?.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect();
+    let get = |k: &str| u.get(k).cloned().unwrap_or_default();
+    (get("ID_VENDOR_FROM_DATABASE"), get("ID_MODEL_FROM_DATABASE"))
+}
+
+/// The CID register of an SD or MMC card (sysfs of the mmc card device).
+fn card_info(dev: &Path) -> Option<CardInfo> {
+    let kind = read(dev.join("type"));
+    if kind != "SD" && kind != "MMC" {
+        return None;
+    }
+    let hex = |f: &str| u32::from_str_radix(read(dev.join(f)).trim_start_matches("0x"), 16).ok();
+    let mid = hex("manfid")?;
+    // SD cards carry two ASCII letters ("SM"); eMMC a one-byte OEM id.
+    let oid = hex("oemid").unwrap_or(0);
+    let letters = [(oid >> 8) as u8, oid as u8];
+    let oem = if kind == "SD" && letters.iter().all(|c| c.is_ascii_graphic()) { String::from_utf8_lossy(&letters).to_string() } else { format!("0x{oid:02X}") };
+    Some(CardInfo {
+        maker: crate::ids::card_maker(kind == "SD", mid).unwrap_or("").to_string(),
+        kind,
+        mid,
+        oem,
+        name: read(dev.join("name")),
+        date: read(dev.join("date")),
+        serial: read(dev.join("serial")),
+    })
+}
+
 fn usb_info(devpath: &Path) -> Option<UsbInfo> {
     // The USB device is the nearest ancestor with idVendor (interfaces don't have it).
     let dev = devpath.ancestors().find(|a| a.join("idVendor").exists())?;
@@ -389,10 +437,19 @@ fn usb_info(devpath: &Path) -> Option<UsbInfo> {
     };
     let serial = Some(read(dev.join("serial"))).filter(|s| !s.is_empty());
     let port = dev.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let (vid, pid) = (read(dev.join("idVendor")), read(dev.join("idProduct")));
+    let (db_vendor, db_product) = usb_db_names(&vid, &pid, &read(dev.join("dev")));
     Some(UsbInfo {
-        vid: read(dev.join("idVendor")).to_ascii_uppercase(),
-        pid: read(dev.join("idProduct")).to_ascii_uppercase(),
+        vid: vid.to_ascii_uppercase(),
+        pid: pid.to_ascii_uppercase(),
         usb_version: read(dev.join("version")),
+        release: super::bcd(&read(dev.join("bcdDevice"))),
+        db_vendor,
+        db_product,
+        manufacturer: read(dev.join("manufacturer")),
+        product: read(dev.join("product")),
+        // "500mA"
+        max_power_ma: read(dev.join("bMaxPower")).trim_end_matches("mA").trim().parse().unwrap_or(0),
         link,
         superspeed_capable: None,
         superspeed_plus_capable: None,
@@ -492,6 +549,16 @@ fn disk_info(name: &str, ms: &[Mount]) -> Option<DiskInfo> {
         if d.serial.is_empty() {
             d.serial = d.usb.as_ref().and_then(|u| u.serial.clone()).unwrap_or_default();
         }
+        d.controller = d.usb.as_ref().map(|u| crate::ids::usb_controller_hint(&u.vid, &u.pid)).unwrap_or_default();
+    }
+    if d.bus == "NVMe" {
+        // The NVMe controller is the PCI function above the namespace (class 01:08).
+        if let Some(pci) = devpath.ancestors().find(|a| read(a.join("class")).starts_with("0x0108")) {
+            d.controller = crate::ids::nvme_controller(&read(pci.join("vendor")), &read(pci.join("device")));
+        }
+    }
+    if name.starts_with("mmcblk") {
+        d.card = card_info(&sys.join("device"));
     }
     d.placeholder_serial = super::suspicious_serial(&d);
     let parts = partitions(name);
@@ -585,11 +652,14 @@ pub struct RawDisk {
     pub size: u64,
     pub sector: u32,
     pub id: String,
+    writable: bool,
     wrote: bool,
 }
 
 impl RawDisk {
     pub fn open(d: &DiskInfo, write: bool) -> io::Result<RawDisk> {
+        let current = disk(&d.id)?;
+        d.check_identity(&current).map_err(io::Error::other)?;
         if write {
             // Re-check right before writing: device names can move when devices come and go.
             let now = check_disk(&d.id).map_err(io::Error::other)?;
@@ -614,7 +684,7 @@ impl RawDisk {
         if unsafe { libc::ioctl(f.as_raw_fd(), 0x8008_1272u32 as _, &mut size) } != 0 {
             size = d.size;
         }
-        Ok(RawDisk { file: f, size, sector: d.sector_size.max(512), id: d.id.clone(), wrote: false })
+        Ok(RawDisk { file: f, size, sector: d.sector_size.max(512), id: d.id.clone(), writable: write, wrote: false })
     }
 }
 
@@ -631,6 +701,9 @@ impl Dev for RawDisk {
         self.size
     }
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+        if !self.writable {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
+        }
         self.wrote = true;
         let mut done = 0;
         while done < buf.len() {
@@ -651,7 +724,7 @@ impl Dev for RawDisk {
         Ok(done)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        if self.writable { self.file.sync_all() } else { Ok(()) }
     }
     fn align(&self) -> usize {
         (self.sector as usize).max(ALIGN)
@@ -747,7 +820,7 @@ pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str
         (_, true) => "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
     };
     let size = size_mib.map(|m| format!("size={m}M, ")).unwrap_or_default();
-    let script = format!("label: {}\nstart=2048, {size}type={ty}\n", if gpt { "gpt" } else { "dos" });
+    let script = format!("label: {}\nstart=1MiB, {size}type={ty}\n", if gpt { "gpt" } else { "dos" });
     let mkfs = match fs {
         "exfat" => "mkfs.exfat",
         "fat32" => "mkfs.vfat",

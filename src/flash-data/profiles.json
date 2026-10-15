@@ -1,0 +1,162 @@
+[
+  {
+    "key": "0x4635c4",
+    "family": "USBest UT165",
+    "vid": 10,
+    "pid": 12,
+    "big_endian": true,
+    "vendor": 136,
+    "product": 144,
+    "revision": 160
+  },
+  {
+    "key": "0x4636e8",
+    "family": "ITE",
+    "vid": 114,
+    "pid": 116,
+    "big_endian": true,
+    "vendor": 8,
+    "product": 16,
+    "revision": 32
+  },
+  {
+    "key": "0x463804",
+    "family": "USBest UT163 variant",
+    "vid": 10,
+    "pid": 12,
+    "big_endian": true,
+    "vendor": 136,
+    "product": 144,
+    "revision": 160
+  },
+  {
+    "key": "0x463928",
+    "family": "USBest UT161",
+    "vid": 34,
+    "pid": 36,
+    "big_endian": false,
+    "vendor": 72,
+    "product": 80,
+    "revision": 96
+  },
+  {
+    "key": "0x4639d8",
+    "family": "Alcor",
+    "vid": 12,
+    "pid": 14,
+    "big_endian": false,
+    "vendor": null,
+    "product": null,
+    "revision": null
+  },
+  {
+    "key": "0x463b08",
+    "family": "Micov",
+    "vid": 246,
+    "pid": 248,
+    "big_endian": false,
+    "vendor": 462,
+    "product": 470,
+    "revision": 486
+  },
+  {
+    "key": "0x463b94",
+    "family": "Chipsbank",
+    "vid": 664,
+    "pid": 666,
+    "big_endian": false,
+    "vendor": 668,
+    "product": 676,
+    "revision": 692
+  },
+  {
+    "key": "0x463c20",
+    "family": "Phison",
+    "vid": 8,
+    "pid": 10,
+    "big_endian": false,
+    "vendor": 176,
+    "product": 156,
+    "revision": 184
+  },
+  {
+    "key": "0x463d44",
+    "family": "Silicon Motion legacy",
+    "vid": 8,
+    "pid": 10,
+    "big_endian": false,
+    "vendor": 248,
+    "product": 256,
+    "revision": 272
+  },
+  {
+    "key": "0x463e54",
+    "family": "Silicon Motion new",
+    "vid": 8,
+    "pid": 10,
+    "big_endian": false,
+    "vendor": 306,
+    "product": 314,
+    "revision": 330
+  },
+  {
+    "key": "0x463f64",
+    "family": "SkyMedi layout 1",
+    "vid": 2,
+    "pid": 4,
+    "big_endian": false,
+    "vendor": 6,
+    "product": 77,
+    "revision": 14
+  },
+  {
+    "key": "0x464028",
+    "family": "SkyMedi layout 10",
+    "vid": 2,
+    "pid": 4,
+    "big_endian": false,
+    "vendor": 6,
+    "product": 43,
+    "revision": 14
+  },
+  {
+    "key": "0x4640ec",
+    "family": "SkyMedi layout 2",
+    "vid": 2,
+    "pid": 4,
+    "big_endian": false,
+    "vendor": 6,
+    "product": 14,
+    "revision": 30
+  },
+  {
+    "key": "0x4641b0",
+    "family": "SanDisk",
+    "vid": null,
+    "pid": null,
+    "big_endian": false,
+    "vendor": null,
+    "product": 54,
+    "revision": null
+  },
+  {
+    "key": "0x46423c",
+    "family": "SSS",
+    "vid": 2,
+    "pid": 0,
+    "big_endian": true,
+    "vendor": 97,
+    "product": 105,
+    "revision": 121
+  },
+  {
+    "key": "0x464340",
+    "family": "DM8261",
+    "vid": 42,
+    "pid": 44,
+    "big_endian": false,
+    "vendor": 46,
+    "product": 54,
+    "revision": 70
+  }
+]

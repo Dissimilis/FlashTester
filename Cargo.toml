@@ -17,7 +17,7 @@ egui_plot = "0.37.0"
 
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Power", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Usb", "Win32_Devices_Properties", "Win32_Security", "Win32_System_Threading", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_System_Memory", "Win32_UI_Shell", "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Power", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Usb", "Win32_Devices_Properties", "Win32_Security", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Com", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_System_Memory", "Win32_UI_Shell", "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

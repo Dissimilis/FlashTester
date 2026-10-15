@@ -23,7 +23,11 @@ Finds out whether a USB stick, SD card or other disk really stores what it claim
 
 ## The GUI
 
-The drive list on the left offers each volume (file mode: tests free space, keeps your files) and each whole disk (raw mode: tests everything, erases it). Pick one, pick a test, and the panel on the right explains what the test does and what it will touch. Whole-disk tests are shown in red and need a confirmation tick. Tests that need administrator rights say so and offer to restart FlashTester elevated. While a test runs, the block map and speed graph fill in; at the end you get the verdict, the next sensible step and buttons for the reports.
+Select any disk to see its identity in the main panel, including firmware, controller hints, device IDs and volumes. Details can be refreshed, copied or saved as HTML and JSON. No separate identification dialog is needed.
+
+Protected drives, including the system drive, offer **Drive details**, **Read speed** and **Read scan**. The speed check defaults to 256 MiB; the scan reads the whole disk unless you enter a size limit. Both can be cancelled. They open the disk read-only without locking or dismounting volumes. Other programs can affect the result and may respond more slowly during a check. Reading does not verify usable capacity.
+
+Other drives also offer file-mode tests in free space and whole-disk write tests. The panel explains what each operation touches. Destructive tests are shown in red and require confirmation. Tests that need administrator rights offer to restart FlashTester elevated. While a test runs, the block map and speed graph fill in; the result includes a verdict and report buttons.
 
 ![Setting up a full test on a volume](website/screenshot-setup.png)
 
@@ -76,7 +80,9 @@ sudo ./flashtester-linux-x86_64 probe --disk sdb --destroy
 
 ## Safety
 
-Any disk can be tested (USB sticks, card readers, internal SATA/NVMe drives, VHDs) **except the disk the running OS uses**: on Windows a disk holding the Windows folder, the boot partition or a page file; on Linux any disk under `/`, `/boot`, `/boot/efi`, `/usr` or `/var` (followed through LVM, RAID and device-mapper layers) or holding swap; on FreeBSD the same mount points, swap and the crash-dump device, followed through partitions, labels, geli, gmirror, ZFS pools and file-backed memory disks. It is refused, always, with no override. Network shares and FUSE pools such as mergerfs are refused because they can't be mapped to one disk. Whole-disk tests destroy everything on the disk and need `--destroy` (or the confirmation tick box in the GUI) and an administrator terminal. File-mode tests only use free space.
+System disks allow identification, read scans and whole-disk read-speed checks. **Writes and file-mode tests remain blocked, with no override**, even when a file benchmark is called without `--write`.
+
+Protection covers disks holding the Windows folder, boot partition or page files; on Linux, disks under `/`, `/boot`, `/boot/efi`, `/usr` or `/var` (through LVM, RAID and device-mapper) or holding swap; on FreeBSD, the same mount points, swap and the crash-dump device (through partitions, labels, geli, gmirror, ZFS pools and file-backed memory disks). If the OS disk cannot be identified, write access fails closed. Network shares and FUSE pools such as mergerfs are refused because they cannot be mapped to one disk. Whole-disk writes erase data and require `--destroy` (or confirmation in the GUI) and administrator or root access. File-mode tests use free space, but a fake drive can redirect those writes onto existing files.
 
 ## Quick start
 
@@ -95,6 +101,8 @@ On Linux use a mount point and a kernel name (`test /media/you/STICK`, `--disk s
 |---|---|---|
 | `list` | Disks and volumes, protection status, USB ID and link speed | no |
 | `info E:` / `info --disk N` | Vendor, product, serial, USB VID:PID, link, volumes, suspicious identity | no |
+| `flash-id "AD D3 10 A6 34 00"` | Offline NAND part lookup, preserving all matching candidates | no |
+| `flash-layouts` / `decode-flash reply.bin --identity-layout 0x463c20` | List recovered identity layouts / decode a saved binary response | no |
 | `test E:` | Fill free space with seeded data, read it all back. `--size 8G`, `--replug`, `--passes N`, `--cleanup` | no |
 | `test --disk N --destroy` | Same over the whole disk (raw) | yes |
 | `endurance E: [--passes N]` | Write + verify again and again with new seeds (0 = until error / Ctrl+C) | raw only |
@@ -112,7 +120,29 @@ On Linux use a mount point and a kernel name (`test /media/you/STICK`, `--disk s
 
 Options for every command: `--json` (result on stdout), `--report file.html|file.json`, `--evidence file.html`, `-q` (no progress).
 
-**Exit codes:** 0 OK, 1 problem found (fake, defective, read-only, unreliable), 2 refused (system disk, missing `--destroy`, not admin), 3 error, 130 cancelled.
+**Exit codes:** 0 OK, 1 problem found (fake, defective, read-only, unreliable), 2 refused (protected operation, missing `--destroy`, not admin), 3 error, 130 cancelled.
+
+### Flash identification
+
+The CLI supports offline NAND lookup and saved-response decoding on Windows, Linux and FreeBSD. These commands use only the data you supply and do not query a drive.
+
+The executable embeds 1,457 NAND records recovered from USB Flash Drive Information Extractor. Supply four or six ID bytes in device order; six bytes rank exact extended-ID matches first. All primary-ID matches remain visible, including conflicting extended IDs. Raw database records, source indices, original die-count tokens and capacity values are preserved in JSON. The source capacity values are not measured usable capacity, and no capacity or die-count filter hides candidates.
+
+```text
+flashtester flash-id "AD D3 10 A6 34 00" --json
+flashtester flash-id "AD:D3:10:A6" --report nand.html
+flashtester decode-flash nand.bin --nand-layout phison --report decoded.json
+flashtester decode-flash nand.bin --nand-layout smi-new
+flashtester decode-flash model.bin --smi-model
+flashtester flash-layouts
+flashtester decode-flash identity.bin --identity-layout 0x463c20 --device-info saved-info.json
+```
+
+NAND reply layouts are `phison`, `smi-legacy` (ID at 0x20), `smi-legacy30` (legacy subtype 3, ID at 0x30), and `smi-new`. The 16 identity profiles decode resolved VID/PID offsets and inquiry vendor/product/revision fields; Alcor's inquiry offsets are derived from the reply's descriptor lengths. Unresolved inquiry fields are reported as unavailable, not as conflicting values. USB string contents, opaque validation fields and most model mappings remain undecoded. `--device-info` optionally compares a capture with a previously saved `info --json` result. Choosing a layout does not establish the controller family. The SMI model-marker search is limited to the recovered region of the first 512 reply bytes. Captures must be binary files of at most 64 KiB; JSON reports preserve their bytes and comparison identity, including when decoding fails. Identification evidence sheets describe offline decoding and do not claim a capacity test was performed.
+
+Normal drive info shows USB-ID hints for known chips and broader Silicon Motion, Phison, Alcor, Chipsbank, ITE and Innostor families. A USB ID can be copied and does not confirm the chip inside. The recovered parsers have synthetic test coverage, but no authentic hardware captures have validated them. Identification does not change capacity-test verdicts.
+
+Database provenance is embedded from `src/flash-data/provenance.json`. To regenerate the data from the original research pack, run `python test/import-flash-db.py PATH_TO_RESEARCH_PACK`. No external DLL, online database or extra runtime file is needed.
 
 ## Verdicts
 

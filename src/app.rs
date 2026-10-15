@@ -34,6 +34,38 @@ pub enum Job {
 }
 
 impl Job {
+    /// Only these whole-disk operations may run on a protected disk.
+    /// A file benchmark still creates files, even with `write: false`.
+    pub fn reads_disk_only(&self) -> bool {
+        matches!(self, Job::Scan { w: Where::Disk(_), .. }
+            | Job::Bench { w: Where::Disk(_), write: false, .. })
+    }
+
+    fn check_access(&self) -> Result<(), String> {
+        if let Job::Iops { secs, .. } = self {
+            crate::perf::iops_duration(*secs).map_err(|e| e.to_string())?;
+        }
+        let w = match self {
+            Job::Fix { disk, .. } => {
+                return disk.check_identity(&platform::check_disk(&disk.id)?);
+            }
+            Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w }
+            | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::SmallFiles { w, .. }
+            | Job::PlugPull { w, .. } | Job::Bench { w, .. } => w,
+        };
+        match w {
+            Where::Disk(d) => {
+                let now = if self.reads_disk_only() {
+                    platform::disk(&d.id).map_err(|e| e.to_string())?
+                } else {
+                    platform::check_disk(&d.id)?
+                };
+                d.check_identity(&now)
+            }
+            Where::Dir { root, .. } => platform::check_path(root).map(|_| ()),
+        }
+    }
+
     /// Destroys data on the whole disk (needs explicit confirmation).
     pub fn destructive(&self) -> bool {
         match self {
@@ -71,15 +103,51 @@ pub fn resolve_disk(n: &str) -> Result<Where, String> {
     Ok(Where::Disk(platform::check_disk(n)?))
 }
 
+pub fn resolve_read_disk(n: &str) -> Result<Where, String> {
+    Ok(Where::Disk(platform::disk(n).map_err(|e| e.to_string())?))
+}
+
+pub fn identification_report(d: &DiskInfo) -> Report {
+    let mut rep = Report::new("info", Where::Disk(d.clone()).target());
+    rep.read_only = true;
+    rep.set(Status::Info, "Drive identification. No storage test was run.");
+    rep.verdict.details = d.details().into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
+    rep.notes.push("Identity comes from the operating system. Controller hints do not confirm the controller or NAND inside the drive. Reported capacity has not been verified.".into());
+    rep.finish(Instant::now());
+    rep
+}
+
 fn refused(cmd: &str, w: Option<&Where>, msg: String) -> Report {
     let mut r = Report::new(cmd, w.map(|w| w.target()).unwrap_or_default());
     r.set(Status::Refused, msg);
     r
 }
 
+fn refused_job(job: &Job, msg: String) -> Report {
+    let (command, target) = match job {
+        Job::Test { w, .. } => ("test", w.target()),
+        Job::Verify { w, .. } => ("verify", w.target()),
+        Job::Probe { w } => ("probe", w.target()),
+        Job::Scan { w, .. } => ("scan", w.target()),
+        Job::Iops { w, .. } => ("iops", w.target()),
+        Job::SmallFiles { w, .. } => ("small-files", w.target()),
+        Job::PlugPull { w, .. } => ("plug-pull", w.target()),
+        Job::Bench { w, .. } => ("bench", w.target()),
+        Job::Fix { disk, .. } => ("fix", Where::Disk(disk.clone()).target()),
+    };
+    let mut rep = Report::new(command, target);
+    rep.read_only = job.reads_disk_only();
+    rep.set(Status::Refused, msg);
+    rep.finish(Instant::now());
+    rep
+}
+
 pub fn run(job: &Job, ctx: &Ctx) -> Report {
+    if let Err(e) = job.check_access() {
+        return refused_job(job, e);
+    }
     if job.needs_admin() && !platform::is_admin() {
-        return refused("", None, "This needs administrator rights: run FlashTester from an elevated (Run as administrator) terminal.".into());
+        return refused_job(job, "This operation requires administrator or root access. Restart FlashTester with those permissions.".into());
     }
     let t0 = Instant::now();
     let _awake = platform::KeepAwake::new();
@@ -100,6 +168,10 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
     }
     if rep.finished.is_empty() {
         rep.finish(t0);
+    }
+    if job.reads_disk_only() {
+        rep.read_only = true;
+        rep.notes.push("Read-only check. No test data was written. Reads cannot confirm usable capacity. Other programs using the drive can affect speed and may respond more slowly during the check.".into());
     }
     rep
 }
@@ -171,7 +243,7 @@ fn run_probe(w: &Where, ctx: &Ctx) -> Report {
                     r
                 }
                 Err(e) => {
-                    let _ = std::fs::remove_dir_all(&dir);
+                    let _ = fulltest::remove_data_dir(&dir);
                     Err(e)
                 }
             }
@@ -180,10 +252,10 @@ fn run_probe(w: &Where, ctx: &Ctx) -> Report {
     match result {
         Ok(p) => {
             let (st, head) = match p.finding.as_str() {
-                "genuine" => (Status::Ok, format!("Capacity is genuine: all {} probes across {} kept their data.", p.positions.len(), size(p.claimed))),
+                "genuine" => (Status::Ok, format!("All {} sampled positions across {} kept their data. Run a full test to check the space between them.", p.positions.len(), size(p.claimed))),
                 "fake" => (Status::Fake, format!("Fake capacity: only about {} of the claimed {} stores data.", size(p.usable), size(p.claimed))),
-                "defective" => (Status::Defective, format!("{} of {} probes lost their data: the flash is defective.", p.bad, p.positions.len())),
-                _ => (Status::ReadOnly, "The drive does not keep written data (read-only or dead).".to_string()),
+                "defective" => (Status::Defective, format!("{} of {} sampled positions lost data. The drive or its connection may be faulty.", p.bad, p.positions.len())),
+                _ => (Status::ReadOnly, "The drive did not retain the written data. It may be read-only or faulty.".to_string()),
             };
             rep.set(st, head);
             // Free space may cover only the low addresses, where every fake still works.
@@ -191,14 +263,14 @@ fn run_probe(w: &Where, ctx: &Ctx) -> Report {
             if p.mode == "free-space" && p.finding == "genuine" && (p.positions.len() < 16 || top < p.claimed / 10 * 9) {
                 rep.set(
                     Status::Info,
-                    format!("Inconclusive: free space reaches only up to {} of {}, and a fake can hide above that. Free up space or use the raw probe.", size(top), size(p.claimed)),
+                    format!("Inconclusive: sampled free space reaches only {} of {}. Capacity beyond that was not checked. Free up space or use a whole-disk probe, which erases data.", size(top), size(p.claimed)),
                 );
             } else if p.mode == "free-space" && p.positions.len() < 64 {
-                rep.warnings.push(format!("Only {} probe positions fell inside free space; the result is coarse.", p.positions.len()));
+                rep.warnings.push(format!("Only {} positions were tested in free space, so the capacity estimate has limited precision.", p.positions.len()));
             }
             if p.finding == "fake"
                 && let Where::Disk(d) = w {
-                    rep.verdict.details.push(format!("Make the drive usable at its real size: {}", platform::fix_hint(&d.id, Some(p.usable))));
+                    rep.verdict.details.push(format!("To erase the drive and format the estimated usable space: {}", platform::fix_hint(&d.id, Some(p.usable))));
                 }
             if let Where::Disk(d) = w {
                 rep.notes.push(format!("The probe overwrote the partition table. Recreate it with: {}", platform::fix_hint(&d.id, None)));
@@ -225,15 +297,19 @@ fn scan(w: &Where, limit: Option<u64>, ctx: &Ctx) -> Report {
                 (Status::Cancelled, format!("Cancelled after {}.", size(s.stats.bytes)))
             } else if s.stop == crate::engine::Stop::Disconnected {
                 (Status::Unreliable, "The drive disconnected during the scan.".to_string())
+            } else if let crate::engine::Stop::Error(e) = &s.stop {
+                (Status::Error, format!("Scan failed: {e}"))
             } else if s.bad_bytes > 0 {
                 (Status::Defective, format!("{} could not be read.", size(s.bad_bytes)))
+            } else if s.events.iter().any(|e| e.kind == "io-error") {
+                (Status::Unreliable, format!("All {} was readable after retries, but some reads failed. Check the drive and its connection.", size(s.size)))
             } else {
                 (Status::Ok, format!("All {} readable at {:.1} MB/s.", size(s.size), s.stats.mb_s))
             };
             rep.set(st, head);
             rep.tested = s.stats.bytes;
             if !s.slow.is_empty() {
-                rep.warnings.push(format!("{} region(s) read much slower than the rest (weak or worn flash).", s.slow.len()));
+                rep.warnings.push(format!("Slow areas found: {}. Read speed alone does not identify the cause.", s.slow.len()));
             }
             rep.scan = Some(s);
         }
@@ -257,8 +333,9 @@ fn iops(w: &Where, secs: f64, write: bool, ctx: &Ctx) -> Report {
                 return Err(std::io::Error::other("need at least 128 MB free"));
             }
             crate::perf::make_iops_file(&path, len, ctx)?;
-            let p2 = path.clone();
-            let r = crate::perf::run_iops(&move |wr| crate::perf::open_unbuffered(&p2, wr), len, true, secs, ctx);
+            let file = crate::perf::open_unbuffered(&path, true)?;
+            let r = crate::perf::run_iops(&|wr| crate::dev::io_handle(&file, wr), len, true, secs, ctx);
+            drop(file);
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&dir);
             r
@@ -266,8 +343,8 @@ fn iops(w: &Where, secs: f64, write: bool, ctx: &Ctx) -> Report {
         Where::Disk(d) => (|| {
             // Writing holds the volume locks for the duration.
             let raw = RawDisk::open(d, write)?;
-            let path = d.path.clone();
-            let r = crate::perf::run_iops(&move |wr| crate::perf::open_unbuffered(Path::new(&path), wr), raw.size, write, secs, ctx);
+            // Every worker stays on this checked device even if its name is reused.
+            let r = crate::perf::run_iops(&|wr| crate::dev::io_handle(&raw.file, wr), raw.size, write, secs, ctx);
             drop(raw);
             r
         })(),
@@ -279,10 +356,13 @@ fn iops(w: &Where, secs: f64, write: bool, ctx: &Ctx) -> Report {
             if let Some(wq) = r.rows.iter().find(|x| x.kind == "write" && x.qd == 1) {
                 rep.verdict.headline.push_str(&format!(" Random 4K write: {:.0} IOPS.", wq.iops));
                 if wq.iops < 50.0 {
-                    rep.warnings.push("Random writes are very slow: running programs or an OS from this drive will be painful.".into());
+                    rep.warnings.push("Random writes are slow. Programs or an operating system stored here may respond slowly.".into());
                 }
             }
             rep.iops = Some(r);
+            if ctx.cancelled() {
+                rep.set(Status::Cancelled, "Cancelled.");
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => rep.set(Status::Cancelled, "Cancelled."),
         Err(e) => rep.set(Status::Error, format!("IOPS test failed: {e}")),
@@ -304,10 +384,10 @@ fn small_files(w: &Where, count: u64, keep: bool, ctx: &Ctx) -> Report {
     } else if r.ok() {
         rep.set(Status::Ok, format!("{} small files written, renamed, deleted and verified without errors ({:.0} files/s).", r.files, r.create_per_s));
     } else {
-        rep.set(Status::Defective, "File system errors: files missing, wrong, or not deleted.");
+        rep.set(Status::Defective, "File errors: missing files, incorrect contents, or files left after deletion.");
     }
     if r.ok() && !keep {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fulltest::remove_data_dir(&dir);
         let _ = std::fs::remove_dir(data_dir(root));
     }
     rep.tested = r.bytes;
@@ -332,14 +412,14 @@ fn fix(disk: &DiskInfo, sz: &FixSize, fs: &str, label: &str, ctx: &Ctx) -> Repor
                 Some((f, _)) if f == "genuine" => None,
                 _ => {
                     rep.verdict = p.verdict;
-                    rep.verdict.details.push("Not repartitioning: the probe did not find a clean capacity boundary.".into());
+                    rep.verdict.details.push("Formatting stopped because the probe could not establish a usable capacity boundary.".into());
                     rep.finish(t0);
                     return rep;
                 }
             }
         }
     };
-    ctx.phase("Repartitioning (diskpart)", 0);
+    ctx.phase("Creating the partition and file system", 0);
     match crate::fix::fix(disk, mib, fs, label) {
         Ok(out) => {
             let part = mib.map(|m| size(m * MIB)).unwrap_or_else(|| size(disk.size));
@@ -365,28 +445,35 @@ fn bench(w: &Where, len: u64, write: bool, ctx: &Ctx) -> Report {
         match w {
             Where::Dir { root, .. } => {
                 let dir = data_dir(root).join("bench");
-                crate::dev::no_link(&dir)?;
-                let _ = std::fs::remove_dir_all(&dir);
+                fulltest::remove_data_dir(&dir)?;
                 fulltest::make_dir(&dir)?;
-                let free = fulltest::free_space(root)?;
-                let len = len.min(free.saturating_sub(64 * MIB)) / MIB * MIB;
-                if len < 16 * MIB {
-                    return Err(std::io::Error::other("need at least 80 MB free"));
+                let result = (|| {
+                    let free = fulltest::free_space(root)?;
+                    let len = len.min(free.saturating_sub(64 * MIB)) / MIB * MIB;
+                    if len < 16 * MIB {
+                        return Err(std::io::Error::other("need at least 80 MB free"));
+                    }
+                    let mut fs = crate::dev::FileSet::new(&dir, len);
+                    let wr = write_pass(&mut fs, pat, 0, len, block, ctx, None);
+                    fs.close()?;
+                    if wr.stop != Stop::Done {
+                        return Err(benchmark_stop("write", wr.stop));
+                    }
+                    let vr = verify_pass(&mut fs, pat, 0, wr.end, block, ctx);
+                    fs.close()?;
+                    if vr.stop != Stop::Done {
+                        return Err(benchmark_stop("verification", vr.stop));
+                    }
+                    if vr.tally.lost() > 0 {
+                        rep.warnings.push(format!("{} of the benchmark data came back wrong: run a full test.", size(vr.tally.lost() * 512)));
+                    }
+                    Ok(crate::perf::BenchResult { size: len, block: block as u64, write: Some(wr.stats), read: vr.stats })
+                })();
+                if let Err(e) = fulltest::remove_data_dir(&dir) {
+                    rep.warnings.push(format!("Cannot remove benchmark files in {}: {e}", dir.display()));
                 }
-                let mut fs = crate::dev::FileSet::new(&dir, len);
-                let wr = write_pass(&mut fs, pat, 0, len, block, ctx, None);
-                fs.close()?;
-                if wr.stop != Stop::Done {
-                    return Err(std::io::Error::other(format!("write stopped: {:?}", wr.stop)));
-                }
-                let vr = verify_pass(&mut fs, pat, 0, wr.end, block, ctx);
-                fs.close()?;
-                let _ = std::fs::remove_dir_all(&dir);
                 let _ = std::fs::remove_dir(data_dir(root));
-                if vr.tally.lost() > 0 {
-                    rep.warnings.push(format!("{} of the benchmark data came back wrong: run a full test.", size(vr.tally.lost() * 512)));
-                }
-                Ok(crate::perf::BenchResult { size: len, block: block as u64, write: Some(wr.stats), read: vr.stats })
+                result
             }
             Where::Disk(d) => {
                 let mut dev = RawDisk::open(d, write)?;
@@ -394,7 +481,7 @@ fn bench(w: &Where, len: u64, write: bool, ctx: &Ctx) -> Report {
                 let wst = if write {
                     let wr = write_pass(&mut dev, pat, 0, len, block, ctx, None);
                     if wr.stop != Stop::Done {
-                        return Err(std::io::Error::other(format!("write stopped: {:?}", wr.stop)));
+                        return Err(benchmark_stop("write", wr.stop));
                     }
                     Some(wr.stats)
                 } else {
@@ -413,12 +500,13 @@ fn bench(w: &Where, len: u64, write: bool, ctx: &Ctx) -> Report {
                 rep.set(Status::Cancelled, "Cancelled.");
             }
             if !rep.warnings.iter().any(|w| w.contains("came back wrong")) {
-                rep.tested = b.size;
+                rep.tested = b.read.bytes;
             } else {
                 rep.verdict.status = Status::Defective;
             }
             rep.bench = Some(b);
         }
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted || ctx.cancelled() => rep.set(Status::Cancelled, "Cancelled."),
         Err(e) => rep.set(Status::Error, format!("Benchmark failed: {e}")),
     }
     if write
@@ -427,4 +515,51 @@ fn bench(w: &Where, len: u64, write: bool, ctx: &Ctx) -> Report {
         }
     rep.finish(t0);
     rep
+}
+
+fn benchmark_stop(phase: &str, stop: crate::engine::Stop) -> std::io::Error {
+    let kind = if stop == crate::engine::Stop::Cancelled { std::io::ErrorKind::Interrupted } else { std::io::ErrorKind::Other };
+    std::io::Error::new(kind, format!("{phase} stopped: {stop:?}"))
+}
+
+#[cfg(test)]
+mod benchmark_tests {
+    use super::*;
+
+    #[test]
+    fn failed_and_cancelled_benchmarks_remove_their_folder() {
+        let root = std::env::temp_dir().join(format!("flashtester-bench-cleanup-{}", crate::pattern::new_tag()));
+        std::fs::create_dir(&root).unwrap();
+        let target = Where::Dir { root: root.clone(), vol: Default::default(), disk: None };
+        let ctx = Ctx::new();
+        let failed = bench(&target, 1, false, &ctx);
+        assert_eq!(failed.verdict.status, Status::Error);
+        assert!(!data_dir(&root).exists());
+        ctx.cancel();
+        let cancelled = bench(&target, 16 * MIB, false, &ctx);
+        assert_eq!(cancelled.verdict.status, Status::Cancelled);
+        assert!(!data_dir(&root).exists());
+        std::fs::remove_dir(root).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod access_tests {
+    use super::*;
+
+    #[test]
+    fn system_disk_access_check_allows_reads_and_refuses_writes() {
+        // Enumeration and access validation only: no raw handle or test starts.
+        let disk = platform::list_disks().into_iter().find(|d| d.protected.is_some()).expect("Windows system disk must be protected");
+        let w = Where::Disk(disk.clone());
+        assert!(Job::Scan { w: w.clone(), size: Some(MIB) }.check_access().is_ok());
+        assert!(Job::Bench { w: w.clone(), size: MIB, write: false }.check_access().is_ok());
+        assert!(Job::Bench { w: w.clone(), size: MIB, write: true }.check_access().is_err());
+        assert!(Job::Test { w: w.clone(), o: TestOpts::default() }.check_access().is_err());
+        assert!(Job::Probe { w }.check_access().is_err());
+        assert!(Job::Fix { disk, size: FixSize::Whole, fs: "exfat".into(), label: "TEST".into() }.check_access().is_err());
+        let root = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap());
+        let w = Where::Dir { root, vol: Default::default(), disk: None };
+        assert!(Job::Bench { w, size: MIB, write: false }.check_access().is_err());
+    }
 }

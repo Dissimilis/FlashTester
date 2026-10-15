@@ -83,10 +83,11 @@ pub fn identity_changes(a: &DiskInfo, b: &DiskInfo) -> Vec<String> {
         ("Serial", a.serial.clone(), b.serial.clone()),
         ("USB VID", ua.vid.clone(), ub.vid.clone()),
         ("USB PID", ua.pid.clone(), ub.pid.clone()),
+        ("USB release", ua.release.clone(), ub.release.clone()),
         ("USB serial", ua.serial.clone().unwrap_or_default(), ub.serial.clone().unwrap_or_default()),
         ("Capacity", a.size.to_string(), b.size.to_string()),
     ];
-    pairs.into_iter().filter(|(_, x, y)| x != y).map(|(k, x, y)| format!("{k} changed: '{x}' -> '{y}'")).collect()
+    pairs.into_iter().filter(|(_, x, y)| x != y).map(|(k, x, y)| format!("{k} changed from '{x}' to '{y}'")).collect()
 }
 
 /// Linux and FreeBSD servers usually don't mount a replugged drive by themselves.
@@ -147,7 +148,7 @@ impl PlugPullResult {
         if !self.unplugged_during_write {
             v.push("The drive was unplugged after writing had finished, so no write was interrupted.".into());
         }
-        v.push(format!("File system after replug: {}", if self.file_system_mounted { "mounted, test folder readable" } else { "NOT readable" }));
+        v.push(format!("File system after reconnecting: {}", if self.file_system_mounted { "mounted, test folder readable" } else { "unreadable" }));
         v.push(format!(
             "Confirmed data: {} intact, {} lost{}",
             size(self.flushed_ok_sectors * 512),
@@ -157,7 +158,7 @@ impl PlugPullResult {
         let inflight = self.in_flight_ok_sectors + self.in_flight_lost_sectors;
         if inflight > 0 {
             v.push(format!(
-                "Unconfirmed (in flight) data: {} survived, {} did not (expected after a power cut, not a defect)",
+                "Data not yet confirmed as saved: {} intact, {} lost. A power cut can lose pending writes.",
                 size(self.in_flight_ok_sectors * 512),
                 size(self.in_flight_lost_sectors * 512)
             ));
@@ -312,7 +313,7 @@ pub fn run_plug_pull(w: &Where, checkpoint: u64, ctx: &Ctx) -> Report {
     } else if r.flushed_lost_sectors > 0 {
         (Status::Defective, format!("{} that the drive had confirmed as saved was lost when power was cut.", size(r.flushed_lost_sectors * 512)))
     } else if !rep.identity_changes.is_empty() {
-        (Status::Unreliable, "Data survived, but the drive reported a different identity after replug.".to_string())
+        (Status::Unreliable, "Data survived. The drive identity changed after reconnecting.".to_string())
     } else if r.flushed == 0 {
         // Nothing was confirmed before the cut: there is nothing to judge.
         (Status::Info, format!("Inconclusive: the drive was pulled before the first flush ({}). Pull it later, or use a smaller --checkpoint.", size(checkpoint)))

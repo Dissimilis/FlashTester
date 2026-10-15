@@ -35,6 +35,22 @@ pub struct UsbInfo {
     pub pid: String,
     /// USB version the device reports (bcdUSB), e.g. "3.20".
     pub usb_version: String,
+    /// Device release (bcdDevice), e.g. "11.00": usually the controller's firmware revision.
+    #[serde(default)]
+    pub release: String,
+    /// Vendor and product names from the system's USB ID database (Linux), if it has them.
+    #[serde(default)]
+    pub db_vendor: String,
+    #[serde(default)]
+    pub db_product: String,
+    /// The device's own manufacturer and product strings (USB string descriptors).
+    #[serde(default)]
+    pub manufacturer: String,
+    #[serde(default)]
+    pub product: String,
+    /// Maximum current the device declares (bMaxPower), in mA; 0 if unknown.
+    #[serde(default)]
+    pub max_power_ma: u32,
     pub link: String,
     pub superspeed_capable: Option<bool>,
     /// Supports SuperSpeed+ (10 Gbit/s or more).
@@ -49,6 +65,23 @@ pub struct UsbInfo {
     pub hub: String,
     #[serde(default)]
     pub port: u32,
+}
+
+impl UsbInfo {
+    /// "VID 090C (Silicon Motion, chip maker) PID 1000, release 11.00"
+    pub fn id_text(&self) -> String {
+        let paren = |s: &str| if s.is_empty() { String::new() } else { format!(" ({s})") };
+        let maker = crate::ids::usb_vendor(&self.vid).unwrap_or_else(|| self.db_vendor.clone());
+        let release = if self.release.is_empty() { String::new() } else { format!(", release {}", self.release) };
+        format!("VID {}{} PID {}{}{release}", self.vid, paren(&maker), self.pid, paren(&self.db_product))
+    }
+
+    /// "\"SMI Corporation\" / \"USB DISK\", max 500 mA": the device's own strings and declared current.
+    pub fn device_text(&self) -> String {
+        let q = |s: &str| if s.is_empty() { "(none)".to_string() } else { format!("\"{s}\"") };
+        let power = if self.max_power_ma == 0 { String::new() } else { format!(", max {} mA", self.max_power_ma) };
+        format!("{} / {}{power}", q(&self.manufacturer), q(&self.product))
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -80,15 +113,81 @@ pub struct DiskInfo {
     pub sector_size: u32,
     pub usb: Option<UsbInfo>,
     pub volumes: Vec<VolumeInfo>,
-    /// Why this disk can never be a test target (system disk etc.).
+    /// Why writes and file-mode tests are blocked (system disk etc.).
     pub protected: Option<String>,
     /// Stable device identity: Windows PnP instance id, Linux sysfs device path.
     pub instance_id: String,
     /// Reason the serial looks like a placeholder.
     pub placeholder_serial: Option<String>,
+    /// NVMe controller by PCI ID, or a labelled USB chip/family hint. A USB ID does
+    /// not prove the physical controller model or identify the NAND inside it.
+    #[serde(default)]
+    pub controller: String,
+    /// The CID register of an SD or MMC card in a directly attached reader.
+    #[serde(default)]
+    pub card: Option<CardInfo>,
+}
+
+/// An SD or (e)MMC card's identity register (CID). USB card readers don't pass it on.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CardInfo {
+    /// "SD" or "MMC".
+    pub kind: String,
+    /// Manufacturer ID and the maker it belongs to (empty if unknown).
+    pub mid: u32,
+    pub maker: String,
+    /// OEM / application ID: two letters on SD cards.
+    pub oem: String,
+    pub name: String,
+    /// Manufacture date, "11/2018".
+    pub date: String,
+    pub serial: String,
+}
+
+impl CardInfo {
+    /// "SD card by Samsung or Transcend (maker 0x1B, OEM SM), ED4QT, made 11/2018"
+    pub fn text(&self) -> String {
+        let by = if self.maker.is_empty() { "unknown maker".to_string() } else { self.maker.clone() };
+        format!("{} card by {by} (maker 0x{:02X}, OEM {}), {}, made {}", self.kind, self.mid, self.oem, self.name, self.date)
+    }
 }
 
 impl DiskInfo {
+    /// OS-reported identity and labelled hints; no vendor commands are sent.
+    pub fn details(&self) -> Vec<(String, String)> {
+        let mut rows: Vec<(String, String)> = [
+            ("Device", self.name()), ("Serial number", self.serial.clone()),
+            ("Firmware", self.revision.clone()), ("Controller / hint", self.controller.clone()),
+            ("Reported capacity", format!("{} ({} bytes)", crate::report::size(self.size), self.size)),
+            ("Connection", self.bus.clone()), ("Sector size", format!("{} bytes", self.sector_size)),
+            ("Device path", self.path.clone()), ("Device ID", self.instance_id.clone()),
+        ].into_iter().map(|(k, v)| (k.into(), if v.is_empty() { "Not reported".into() } else { v })).collect();
+        if let Some(u) = &self.usb {
+            rows.push(("USB ID".into(), u.id_text()));
+            rows.push(("USB device".into(), u.device_text()));
+            rows.push(("USB connection".into(), u.link.clone()));
+        }
+        if let Some(c) = &self.card {
+            rows.push(("Card".into(), c.text()));
+        }
+        if let Some(why) = &self.protected {
+            rows.push(("Write protection".into(), why.clone()));
+        }
+        for v in &self.volumes {
+            rows.push(("Volume".into(), format!("{} {} | {} | {} | {} free of {}", v.mount_points.join(", "), v.label, v.guid, v.fs, crate::report::size(v.free), crate::report::size(v.size))));
+        }
+        rows
+    }
+
+    pub fn check_identity(&self, now: &Self) -> Result<(), String> {
+        if self.id != now.id || self.path != now.path || self.instance_id != now.instance_id
+            || self.size != now.size || self.serial != now.serial || self.sector_size != now.sector_size {
+            Err(format!("Disk {} changed since it was selected. Refresh the drive list and select it again.", self.id))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn name(&self) -> String {
         let n = format!("{} {}", self.vendor, self.product).trim().to_string();
         if n.is_empty() { "(no name)".into() } else { n }
@@ -97,6 +196,17 @@ impl DiskInfo {
     pub fn letters(&self) -> String {
         let v: Vec<_> = self.volumes.iter().filter_map(|v| v.mount_points.iter().min_by_key(|m| m.len()).cloned()).collect();
         v.join(" ")
+    }
+}
+
+/// A BCD version as four hex digits ("0210", "1100") -> "2.10", "11.00".
+pub fn bcd(s: &str) -> String {
+    let s = s.trim();
+    if s.len() == 4 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        let major = s[..2].trim_start_matches('0');
+        format!("{}.{}", if major.is_empty() { "0" } else { major }, &s[2..])
+    } else {
+        s.to_string()
     }
 }
 
@@ -232,4 +342,21 @@ fn run(cmd: &str, args: &[&str], input: Option<&str>) -> Result<String, String> 
         return Err(format!("{cmd} failed:\n{text}"));
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bcd_and_id_text() {
+        assert_eq!(bcd("1100"), "11.00");
+        assert_eq!(bcd("0210"), "2.10");
+        assert_eq!(bcd("0000"), "0.00");
+        assert_eq!(bcd(" 2.10"), "2.10");
+        let u = UsbInfo { vid: "090C".into(), pid: "1000".into(), release: "11.00".into(), ..Default::default() };
+        assert_eq!(u.id_text(), "VID 090C (Silicon Motion, chip maker) PID 1000, release 11.00");
+        let u = UsbInfo { vid: "ABCD".into(), pid: "1234".into(), db_vendor: "LogiLink".into(), db_product: "UDisk flash drive".into(), ..Default::default() };
+        assert_eq!(u.id_text(), "VID ABCD (LogiLink) PID 1234 (UDisk flash drive)");
+    }
 }

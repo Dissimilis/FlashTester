@@ -77,10 +77,7 @@ pub struct Manifest {
 /// Create a test folder. Right after `clean`, Windows can still hold the old
 /// folder as delete-pending and refuse access for a moment: retry briefly.
 pub fn make_dir(p: &Path) -> io::Result<()> {
-    // Neither the folder nor the FlashTester folder above it may be a link.
-    for a in p.ancestors().take(2) {
-        crate::dev::no_link(a)?;
-    }
+    check_data_dir(p)?;
     for _ in 0..20 {
         match std::fs::create_dir_all(p) {
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => std::thread::sleep(std::time::Duration::from_millis(250)),
@@ -88,6 +85,23 @@ pub fn make_dir(p: &Path) -> io::Result<()> {
         }
     }
     std::fs::create_dir_all(p)
+}
+
+fn check_data_dir(p: &Path) -> io::Result<()> {
+    // Neither the folder nor the FlashTester folder above it may be a link.
+    for a in p.ancestors().take(2) {
+        crate::dev::no_link(a)?;
+    }
+    Ok(())
+}
+
+/// Remove an owned test subfolder only after checking it and its parent.
+pub fn remove_data_dir(p: &Path) -> io::Result<()> {
+    check_data_dir(p)?;
+    match std::fs::remove_dir_all(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
 }
 
 pub fn data_dir(root: &Path) -> PathBuf {
@@ -148,7 +162,7 @@ pub fn clean(root: &Path) -> io::Result<(u64, u64)> {
         let p = e.path();
         let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
         if p.is_dir() && matches!(p.file_name().and_then(|x| x.to_str()), Some("small" | "probe")) {
-            std::fs::remove_dir_all(&p)?;
+            remove_data_dir(&p)?;
             n += 1;
         } else if matches!(ext, "ftd" | "ftp" | "ftc" | "fti") || p.file_name().and_then(|x| x.to_str()) == Some(MANIFEST) {
             bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
@@ -280,7 +294,7 @@ pub fn run_test(w: &Where, o: &TestOpts, ctx: &Ctx) -> Report {
                 Ok((changes, now)) => {
                     if !changes.is_empty() {
                         rep.identity_changes.extend(changes);
-                        rep.set(Status::Error, "The drive reported a different identity after replug; not touching it further.");
+                        rep.set(Status::Error, "The drive identity changed after reconnecting. Testing stopped.");
                         break;
                     }
                     if let Where::Dir { root, vol, .. } = &*w {
@@ -288,7 +302,7 @@ pub fn run_test(w: &Where, o: &TestOpts, ctx: &Ctx) -> Report {
                         let same = again.as_ref().is_ok_and(|(v, _)| v.fs == vol.fs && v.label == vol.label && v.size.abs_diff(vol.size) <= MIB);
                         if !same {
                             let why = again.err().unwrap_or_else(|| format!("a different volume is now at {}", root.display()));
-                            rep.set(Status::Error, format!("After replug: {why}; not touching it further."));
+                            rep.set(Status::Error, format!("After reconnecting: {why}. Testing stopped."));
                             break;
                         }
                     }
@@ -305,7 +319,7 @@ pub fn run_test(w: &Where, o: &TestOpts, ctx: &Ctx) -> Report {
             dev = match open_dev(w, end, false) {
                 Ok(d) => d,
                 Err(e) => {
-                    rep.set(Status::Error, format!("Cannot reopen after replug: {e}"));
+                    rep.set(Status::Error, format!("Cannot reopen the drive after reconnecting: {e}"));
                     break;
                 }
             };
@@ -349,7 +363,7 @@ pub fn run_test(w: &Where, o: &TestOpts, ctx: &Ctx) -> Report {
     if let (Where::Dir { vol, .. }, Some(_)) = (w, rep.verify.last())
         && rep.tested < vol.size / 10 * 9 && rep.verdict.status == Status::Ok {
             let why = if o.size.is_some() { "limited by --size" } else { "the rest is in use" };
-            rep.warnings.push(format!("Only {} of the volume's {} was tested ({why}). Fake drives hide their fakeness in untested space: test an empty drive, or run a raw probe.", size(rep.tested), size(vol.size)));
+            rep.warnings.push(format!("Only {} of the volume's {} was tested ({why}). Untested space may still lose data. For broader coverage, back up and empty the drive, or use a whole-disk probe, which erases data.", size(rep.tested), size(vol.size)));
         }
     rep.finish(t0);
     rep
@@ -412,7 +426,7 @@ pub fn judge(rep: &mut Report) {
             (t.corrupted, "corrupted"),
             (t.changed, "slightly changed (<8 bits per sector)"),
             (t.aliased, "overwritten by writes to other positions (aliased)"),
-            (t.stale, "old data (the write never landed)"),
+            (t.stale, "old data (new data was not stored)"),
             (t.unreadable, "unreadable or missing"),
         ]
         .iter()
@@ -425,7 +439,7 @@ pub fn judge(rep: &mut Report) {
         d.push("The drive disconnected during the test. Try another port, cable or card reader.".into());
     }
     if has("unstable") || has("transient-io") {
-        d.push("Some reads failed or returned different data on retry: suspect the connection (port, cable, reader) as well as the flash.".into());
+        d.push("Some reads failed or returned different data on retry. The drive or its connection may be faulty. Try another port, cable or reader.".into());
     }
 
     let readonly_early = early.as_deref().is_some_and(|m| m.contains("ignores writes"));
@@ -445,7 +459,7 @@ pub fn judge(rep: &mut Report) {
     } else if has("transient-io") || has("unstable") || has("io-error") {
         (Status::Unreliable, "All data verified, but reads failed at times. The drive or its connection is unreliable.".to_string())
     } else if checked == 0 {
-        (Status::Error, "Nothing was verified.".to_string())
+        (Status::Error, "No test data was checked.".to_string())
     } else {
         let what = if rep.command == "verify" { "read back" } else { "written and read back" };
         (Status::Ok, format!("All {} {what} without errors.", size(checked)))
@@ -525,7 +539,7 @@ pub fn run_verify(w: &Where, src: VerifySource, loops: u32, ctx: &Ctx) -> Report
         judge(&mut rep);
         // In a verify, "stale" means the data is from another run: we can't call that read-only.
         if rep.verdict.status == Status::ReadOnly {
-            rep.set(Status::Defective, "The data on the drive is not the data that was written (another run's data or lost writes).");
+            rep.set(Status::Defective, "The stored data differs from the test data. It may belong to an earlier run, or the drive may have lost writes.");
         }
     }
     rep.finish(t0);

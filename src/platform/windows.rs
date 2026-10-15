@@ -27,6 +27,7 @@ pub const FSCTL_GET_RETRIEVAL_POINTERS: u32 = 0x0009_0073;
 pub const FSCTL_GET_RETRIEVAL_POINTER_BASE: u32 = 0x0009_0234;
 const IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX: u32 = 0x0022_0448;
 const IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2: u32 = 0x0022_045C;
+const IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION: u32 = 0x0022_0410;
 
 const GUID_DEVINTERFACE_DISK: GUID = GUID::from_u128(0x53f56307_b6bf_11d0_94f2_00a0c91efb8b);
 const GUID_DEVINTERFACE_USB_HUB: GUID = GUID::from_u128(0xf18a0e88_c30c_11d0_8815_00a0c906bed8);
@@ -233,14 +234,29 @@ pub fn protected_disks() -> io::Result<BTreeMap<String, String>> {
     }
     // A VHD-booted or Storage Spaces system sits on physical disks this list can't see.
     for n in m.keys() {
-        if let Ok(f) = open_dev(&format!("\\\\.\\PhysicalDrive{n}"), 0) {
-            let mut desc = vec![0u8; 1024];
-            if ioctl(&f, IOCTL_STORAGE_QUERY_PROPERTY, &[0u8; 12], &mut desc).is_ok() && matches!(u32_at(&desc, 28), 14..=16) {
-                return Err(io::Error::other(format!("the system disk (disk {n}) is a virtual disk or Storage Space; its physical disks can't be identified")));
-            }
+        let query_error = |e| io::Error::other(format!("cannot identify the system disk's bus (disk {n}): {e}"));
+        let f = open_dev(&format!("\\\\.\\PhysicalDrive{n}"), 0).map_err(query_error)?;
+        let mut desc = vec![0u8; 1024];
+        let got = ioctl(&f, IOCTL_STORAGE_QUERY_PROPERTY, &[0u8; 12], &mut desc).map_err(query_error)?;
+        let bus = protected_disk_bus(&desc[..got.min(desc.len())]).map_err(query_error)?;
+        if matches!(bus, 14..=16) {
+            return Err(io::Error::other(format!("the system disk (disk {n}) is a virtual disk or Storage Space; its physical disks can't be identified")));
         }
     }
     Ok(m)
+}
+
+fn protected_disk_bus(desc: &[u8]) -> io::Result<u32> {
+    // STORAGE_DEVICE_DESCRIPTOR through RawPropertiesLength. A zero-filled or
+    // truncated reply cannot establish that a protected disk has physical backing.
+    if desc.len() < 36 || u32_at(desc, 0) < 36 || u32_at(desc, 4) < 36 || u32_at(desc, 4) as usize > desc.len() {
+        return Err(io::Error::other("missing or truncated storage descriptor"));
+    }
+    let bus = u32_at(desc, 28);
+    if !(1..=19).contains(&bus) {
+        return Err(io::Error::other(format!("unknown storage bus type {bus}")));
+    }
+    Ok(bus)
 }
 
 fn cm_id(devinst: u32) -> String {
@@ -333,9 +349,10 @@ fn usb_info(disk_devinst: u32) -> Option<UsbInfo> {
     let mut b = vec![0u8; 512];
     b[0..4].copy_from_slice(&port.to_le_bytes());
     if ioctl(&hf, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, &b.clone(), &mut b).is_ok() {
-        // packed struct: descriptor at 4 (bcdUSB at 6, idVendor 12, idProduct 14), Speed at 23
+        // packed struct: descriptor at 4 (bcdUSB at 6, idVendor 12, idProduct 14, bcdDevice 16), Speed at 23
         let bcd = u16::from_le_bytes([b[6], b[7]]);
         info.usb_version = format!("{:x}.{:02x}", bcd >> 8, bcd & 0xff);
+        info.release = super::bcd(&format!("{:04x}", u16::from_le_bytes([b[16], b[17]])));
         info.vid = format!("{:04X}", u16::from_le_bytes([b[12], b[13]]));
         info.pid = format!("{:04X}", u16::from_le_bytes([b[14], b[15]]));
         let speed = b[23];
@@ -360,7 +377,52 @@ fn usb_info(disk_devinst: u32) -> Option<UsbInfo> {
             info.slow_link = false;
         }
     }
+    // String indexes from the device descriptor (iManufacturer at 14, iProduct at 15).
+    let lang = usb_descriptor(&hf, port, 3, 0, 0, 255).filter(|s| s.len() >= 4).map_or(0x0409, |s| u16::from_le_bytes([s[2], s[3]]));
+    let string = |i: u8| if i == 0 { String::new() } else { usb_descriptor(&hf, port, 3, i, lang, 255).map(|s| usb_string(&s)).unwrap_or_default() };
+    info.manufacturer = string(b[18]);
+    info.product = string(b[19]);
+    // bMaxPower (configuration descriptor byte 8) counts 2 mA, or 8 mA at SuperSpeed.
+    if let Some(c) = usb_descriptor(&hf, port, 2, 0, 0, 9).filter(|c| c.len() >= 9) {
+        info.max_power_ma = c[8] as u32 * if info.link.contains("SuperSpeed") { 8 } else { 2 };
+    }
     Some(info)
+}
+
+/// GET_DESCRIPTOR sent by the hub to the device on `port` (USB_DESCRIPTOR_REQUEST:
+/// connection index, setup packet, then the data).
+fn usb_descriptor(hub: &File, port: u32, kind: u8, index: u8, lang: u16, len: u16) -> Option<Vec<u8>> {
+    let mut b = vec![0u8; 12 + len as usize];
+    b[0..4].copy_from_slice(&port.to_le_bytes());
+    b[4] = 0x80; // device to host, standard, device
+    b[5] = 6; // GET_DESCRIPTOR
+    b[6..8].copy_from_slice(&((kind as u16) << 8 | index as u16).to_le_bytes());
+    b[8..10].copy_from_slice(&lang.to_le_bytes());
+    b[10..12].copy_from_slice(&len.to_le_bytes());
+    let inp = b.clone();
+    let n = ioctl(hub, IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION, &inp, &mut b).ok()?;
+    (n > 12).then(|| b[12..n.min(b.len())].to_vec())
+}
+
+/// A string descriptor: length, type 3, then UTF-16LE text.
+fn usb_string(d: &[u8]) -> String {
+    let end = (d.first().copied().unwrap_or(0) as usize).min(d.len());
+    let units: Vec<u16> = d.get(2..end).unwrap_or(&[]).chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    String::from_utf16_lossy(&units).trim().to_string()
+}
+
+/// The NVMe controller above a disk devnode, named by its PCI ID ("PCI\VEN_1987&DEV_5018&...").
+fn nvme_pci(disk_devinst: u32) -> Option<String> {
+    let mut d = disk_devinst;
+    for _ in 0..4 {
+        d = cm_parent(d)?;
+        let id = cm_id(d).to_ascii_uppercase();
+        if let Some(rest) = id.strip_prefix("PCI\\") {
+            let field = |k: &str| rest.find(k).map(|i| rest[i + k.len()..].chars().take(4).collect::<String>());
+            return Some(crate::ids::nvme_controller(&field("VEN_")?, &field("DEV_")?));
+        }
+    }
+    None
 }
 
 fn disk_details(path: &str, devinst: u32) -> io::Result<DiskInfo> {
@@ -386,6 +448,10 @@ fn disk_details(path: &str, devinst: u32) -> io::Result<DiskInfo> {
     }
     if d.bus == "USB" {
         d.usb = usb_info(devinst);
+        d.controller = d.usb.as_ref().map(|u| crate::ids::usb_controller_hint(&u.vid, &u.pid)).unwrap_or_default();
+    }
+    if d.bus == "NVMe" {
+        d.controller = nvme_pci(devinst).unwrap_or_default();
     }
     d.placeholder_serial = super::suspicious_serial(&d);
     if d.usb.as_ref().is_some_and(|u| u.serial.is_none()) && d.serial.is_empty() {
@@ -453,6 +519,7 @@ pub struct RawDisk {
     pub size: u64,
     pub sector: u32,
     pub id: String,
+    writable: bool,
     _locks: Vec<File>,
     wrote: bool,
 }
@@ -460,13 +527,15 @@ pub struct RawDisk {
 impl RawDisk {
     pub fn open(d: &DiskInfo, write: bool) -> io::Result<RawDisk> {
         let mut locks = vec![];
+        let current = disk(&d.id)?;
+        d.check_identity(&current).map_err(io::Error::other)?;
         if write {
             // Re-check right before writing: disk numbers can move when devices come and go.
             let now = check_disk(&d.id).map_err(io::Error::other)?;
             if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial {
                 return Err(io::Error::other(format!("disk {} is no longer the drive that was selected; refusing to write", d.id)));
             }
-            for v in &d.volumes {
+            for v in &current.volumes {
                 locks.push(lock_volume(v)?);
             }
         }
@@ -482,7 +551,7 @@ impl RawDisk {
         if write && ioctl(&f, IOCTL_DISK_IS_WRITABLE, &[], &mut []).is_err() {
             return Err(io::Error::other("the disk is write-protected"));
         }
-        Ok(RawDisk { file: f, size: u64::from_le_bytes(len), sector: d.sector_size.max(512), id: d.id.clone(), _locks: locks, wrote: false })
+        Ok(RawDisk { file: f, size: u64::from_le_bytes(len), sector: d.sector_size.max(512), id: d.id.clone(), writable: write, _locks: locks, wrote: false })
     }
 }
 
@@ -519,6 +588,9 @@ impl Dev for RawDisk {
         self.size
     }
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+        if !self.writable {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
+        }
         self.wrote = true;
         let mut done = 0;
         while done < buf.len() {
@@ -539,10 +611,55 @@ impl Dev for RawDisk {
         Ok(done)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        if self.writable { self.file.sync_all() } else { Ok(()) }
     }
     fn align(&self) -> usize {
         (self.sector as usize).max(ALIGN)
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    #[test]
+    fn protected_bus_requires_a_complete_known_descriptor() {
+        let mut descriptor = [0u8; 40];
+        descriptor[0..4].copy_from_slice(&40u32.to_le_bytes());
+        descriptor[4..8].copy_from_slice(&40u32.to_le_bytes());
+        descriptor[28..32].copy_from_slice(&17u32.to_le_bytes());
+        assert_eq!(protected_disk_bus(&descriptor).unwrap(), 17);
+        for len in 0..descriptor.len() {
+            assert!(protected_disk_bus(&descriptor[..len]).is_err());
+        }
+        for bus in [0u32, 20, u32::MAX] {
+            descriptor[28..32].copy_from_slice(&bus.to_le_bytes());
+            assert!(protected_disk_bus(&descriptor).is_err());
+        }
+        for bus in 14u32..=16 {
+            descriptor[28..32].copy_from_slice(&bus.to_le_bytes());
+            assert_eq!(protected_disk_bus(&descriptor).unwrap(), bus);
+        }
+        assert!(protected_disk_bus(&[0; 40]).is_err());
+    }
+
+    #[test]
+    fn raw_read_handle_rejects_writes_without_marking_disk_changed() {
+        // A scratch file, never a physical drive. Even a writable OS handle must
+        // not bypass the RawDisk mode guard or trigger partition refresh on drop.
+        let path = std::env::temp_dir().join(format!("flashtester-read-only-{}.bin", std::process::id()));
+        let file = OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
+        file.set_len(4096).unwrap();
+        let mut raw = RawDisk { file, size: 4096, sector: 512, id: "fixture".into(), writable: false, _locks: vec![], wrote: false };
+        let error = raw.write_at(0, &[42; 512]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!raw.wrote);
+        raw.flush().unwrap();
+        let mut data = [1; 512];
+        assert_eq!(raw.read_at(0, &mut data).unwrap(), 512);
+        assert_eq!(data, [0; 512]);
+        drop(raw);
+        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -608,8 +725,34 @@ pub fn reports_dir() -> PathBuf {
 /// Nothing to do on Windows: an elevated process writes as the same user.
 pub fn give_to_user(_p: &Path) {}
 
-pub fn open_file(p: &Path) {
-    let _ = std::process::Command::new("explorer").arg(p).spawn();
+pub fn open_file(p: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC};
+
+    std::fs::metadata(p)?;
+    let path = std::path::absolute(p)?;
+    // Shell handlers can require STA. Keep this separate from the GUI's COM
+    // apartment, and wait for the launch before releasing this thread's COM.
+    std::thread::spawn(move || {
+        let initialized = unsafe { CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) };
+        if initialized < 0 {
+            return Err(io::Error::other(format!("Cannot initialize the Windows shell (0x{:08X})", initialized as u32)));
+        }
+        let file: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let verb = wide("open");
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+            lpVerb: verb.as_ptr(),
+            lpFile: file.as_ptr(),
+            nShow: 1,
+            ..Default::default()
+        };
+        let result = if unsafe { ShellExecuteExW(&mut info) } != 0 { Ok(()) } else { Err(io::Error::last_os_error()) };
+        unsafe { CoUninitialize() };
+        result
+    }).join().unwrap_or_else(|_| Err(io::Error::other("The Windows shell launcher stopped unexpectedly")))
 }
 
 /// Relaunch this exe elevated with the same arguments (UAC prompt).

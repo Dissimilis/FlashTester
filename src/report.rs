@@ -123,6 +123,9 @@ pub struct Report {
     pub verdict: Verdict,
     pub warnings: Vec<String>,
     pub notes: Vec<String>,
+    /// The operation opens the target only for reading, including failed checks.
+    #[serde(default)]
+    pub read_only: bool,
     /// Bytes of test data covered.
     pub tested: u64,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -148,6 +151,9 @@ pub struct Report {
     /// What the drive's own SMART counters did during the run.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub smart: Option<crate::smart::SmartRun>,
+    /// Offline NAND lookup or imported controller response, never evidence of usable capacity.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub flash: Option<crate::flash::Identification>,
 }
 
 pub fn tool_name() -> String {
@@ -165,20 +171,20 @@ impl Report {
         if let Some(d) = &self.target.disk {
             if let Some(u) = &d.usb
                 && u.slow_link {
-                    let cap = if u.superspeed_capable == Some(true) { " although the drive supports USB 3" } else { "" };
+                    let cap = if u.superspeed_capable == Some(true) { " The drive supports USB 3; try a USB 3 port, cable or reader." } else { "" };
                     self.warnings.push(format!(
-                        "The drive is connected at {}{cap}: speeds are capped at about 40 MB/s. Try a USB 3 port or another cable/reader.",
+                        "Connected at {}. The USB link limits transfer speed.{cap}",
                         u.link
                     ));
                 }
             if let Some(u) = d.usb.as_ref().filter(|u| u.superspeed_plus_capable == Some(true) && !u.link.contains("SuperSpeed+")) {
                 self.warnings.push(format!(
-                    "The drive supports 10 Gbit/s USB but is connected at {}: speeds are capped at about 450 MB/s. Use a USB 3.2 Gen 2 (10 Gbit/s) port and cable.",
+                    "Connected at {}. The drive supports 10 Gbit/s USB. Use a compatible 10 Gbit/s port and cable for a faster link.",
                     u.link
                 ));
             }
             if let Some(p) = &d.placeholder_serial {
-                self.warnings.push(format!("Suspicious identity: {p}. Fake drives often use placeholder serials."));
+                self.warnings.push(format!("Check the serial number: {p}. This alone does not show whether the drive is fake."));
             }
             if d.vendor.is_empty() && d.product.is_empty() {
                 self.warnings.push("The drive reports no vendor or product name.".into());
@@ -245,7 +251,7 @@ impl Report {
             if t.lost() > 0 {
                 let _ = writeln!(
                     s,
-                    "  changed (<8 bits) {}, corrupted {}, aliased {}, stale (write never landed) {}, unreadable {}",
+                    "  changed (<8 bits) {}, corrupted {}, aliased {}, stale (new data was not stored) {}, unreadable {}",
                     t.changed, t.corrupted, t.aliased, t.stale, t.unreadable
                 );
                 if let Some(f) = &t.first_error {
@@ -298,7 +304,7 @@ impl Report {
             }
         }
         if !self.identity_changes.is_empty() {
-            let _ = writeln!(s, "\nIdentity changed across replug:");
+            let _ = writeln!(s, "\nIdentity changed after reconnecting:");
             for c in &self.identity_changes {
                 let _ = writeln!(s, "  {c}");
             }
@@ -369,7 +375,7 @@ pub fn slc_cliff(st: &IoStats) -> Option<String> {
         return None;
     }
     let at = m.iter().find(|p| p.mb_s < (head + tail_med) / 2.0)?;
-    Some(format!("Write speed drops from {:.0} to about {:.0} MB/s after {} (cache full)", head, tail_med, size(at.pos)))
+    Some(format!("Write speed drops from {:.0} to about {:.0} MB/s after {} (possible write-cache limit)", head, tail_med, size(at.pos)))
 }
 
 fn esc(s: &str) -> String {
@@ -402,7 +408,7 @@ fn speed_svg(series: &[(&str, &str, &IoStats)]) -> String {
     }
     s.push_str("</svg>");
     let legend: Vec<String> = series.iter().map(|(n, c, _)| format!(r#"<span style="color:{c}">&#9644; {n}</span>"#)).collect();
-    format!("{s}<div class=\"legend\">{} &middot; MB/s by position</div>", legend.join(" "))
+    format!("{s}<div class=\"legend\">{}. MB/s by position</div>", legend.join(" "))
 }
 
 const CSS: &str = r#"
@@ -414,7 +420,7 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:24px 0 8px;border-bott
 .verdict{font-size:20px;font-weight:600}.s-ok{color:var(--ok)}.s-bad{color:var(--bad)}.s-warn{color:var(--warn)}
 table{border-collapse:collapse;width:100%;font-size:14px}td,th{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}
 .chart{width:100%;height:auto}.grid{stroke:var(--line)}.lbl{fill:var(--mut);font-size:11px}.legend{font-size:13px;color:var(--mut)}
-.map{display:flex;flex-wrap:wrap;gap:1px}.map i{width:8px;height:12px;display:block}.p-ok{background:var(--ok)}.p-bad{background:var(--bad)}.p-alias{background:var(--warn)}
+.map{display:flex;flex-wrap:wrap;gap:1px}.map i{width:8px;height:12px;display:block}.p-ok{background:var(--ok)}.p-bad{background:var(--bad)}.p-alias{background:var(--warn)}.p-unknown{background:var(--mut)}
 code{font-size:13px}ul{margin:4px 0;padding-left:20px}
 "#;
 
@@ -442,9 +448,16 @@ fn identity_rows(t: &Target) -> String {
         row("Claimed capacity", format!("{} ({} bytes)", size(d.size), d.size));
         row("Bus", format!("{}{}", d.bus, if d.removable { ", removable" } else { "" }));
         if let Some(u) = &d.usb {
-            row("USB ID", format!("VID {} PID {}, USB {}", u.vid, u.pid, u.usb_version));
+            row("USB ID", format!("{}, USB {}", u.id_text(), u.usb_version));
             row("USB serial", u.serial.clone().unwrap_or_else(|| "(none)".into()));
             row("Link", u.link.clone());
+            row("USB device", u.device_text());
+        }
+        if !d.controller.is_empty() {
+            row("Controller", d.controller.clone());
+        }
+        if let Some(c) = &d.card {
+            row("Card", format!("{}, serial {}", c.text(), c.serial));
         }
         row(if cfg!(windows) { "Windows device" } else { "Device" }, d.instance_id.clone());
     }
@@ -459,7 +472,7 @@ impl Report {
     pub fn html(&self) -> String {
         let mut b = String::new();
         let _ = write!(b, "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>FlashTester report</title><style>{CSS}</style></head><body>");
-        let _ = write!(b, "<h1>FlashTester report</h1><div class=mut>{} &middot; {} &middot; started {} &middot; {}</div>", esc(&self.tool), esc(&self.command), esc(&self.started), duration(self.seconds));
+        let _ = write!(b, "<h1>FlashTester report</h1><div class=mut>{}: {}. Started {}. Duration: {}.</div>", esc(&self.tool), esc(&self.command), esc(&self.started), duration(self.seconds));
         let _ = write!(b, "<div class=card><div class=\"verdict {}\">{}: {}</div>", status_class(self.verdict.status), self.verdict.status.label(), esc(&self.verdict.headline));
         if !self.verdict.details.is_empty() {
             b.push_str("<ul>");
@@ -515,7 +528,7 @@ impl Report {
         if let Some(v) = self.verify.last() {
             let t = &v.tally;
             b.push_str("<h2>Verification</h2><table>");
-            for (k, n) in [("OK", t.ok), ("Slightly changed (&lt;8 bits)", t.changed), ("Corrupted", t.corrupted), ("Aliased (wraparound)", t.aliased), ("Stale (write never landed)", t.stale), ("Unreadable", t.unreadable)] {
+            for (k, n) in [("OK", t.ok), ("Slightly changed (&lt;8 bits)", t.changed), ("Corrupted", t.corrupted), ("Aliased (wraparound)", t.aliased), ("Stale (new data was not stored)", t.stale), ("Unreadable", t.unreadable)] {
                 let _ = write!(b, "<tr><th>{k}</th><td>{n} sectors ({})</td></tr>", size(n * 512));
             }
             b.push_str("</table>");
@@ -525,7 +538,7 @@ impl Report {
             if !t.bad_ranges.is_empty() {
                 b.push_str("<details><summary>Bad ranges</summary><table><tr><th>Start</th><th>End</th><th>Kind</th></tr>");
                 for r in t.bad_ranges.iter().take(300) {
-                    let _ = write!(b, "<tr><td>{} (0x{:x})</td><td>{}</td><td>{}</td></tr>", size(r.start), r.start, size(r.end), r.kind);
+                    let _ = write!(b, "<tr><td>{} (0x{:x})</td><td>{}</td><td>{}</td></tr>", size(r.start), r.start, size(r.end), esc(&r.kind));
                 }
                 b.push_str("</table></details>");
             }
@@ -561,7 +574,7 @@ impl Report {
         if let Some(i) = &self.iops {
             b.push_str("<h2>Random 4K I/O</h2><table><tr><th>Kind</th><th>QD</th><th>IOPS</th><th>MB/s</th><th>p50 ms</th><th>p99 ms</th><th>max ms</th></tr>");
             for r in &i.rows {
-                let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{:.0}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{:.1}</td></tr>", r.kind, r.qd, r.iops, r.mb_s, r.p50_ms, r.p99_ms, r.max_ms);
+                let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{:.0}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{:.1}</td></tr>", esc(&r.kind), r.qd, r.iops, r.mb_s, r.p50_ms, r.p99_ms, r.max_ms);
             }
             b.push_str("</table>");
         }
@@ -581,15 +594,15 @@ impl Report {
         if !events.is_empty() {
             b.push_str("<h2>Events</h2><table><tr><th>Time</th><th>Kind</th><th>Offset</th><th>Detail</th></tr>");
             for e in events.iter().take(500) {
-                let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", e.time, e.kind, size(e.offset), esc(&e.detail));
+                let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", esc(&e.time), esc(&e.kind), size(e.offset), esc(&e.detail));
             }
             b.push_str("</table>");
             if events.iter().any(|e| e.kind == "disconnect" || e.kind == "unstable" || e.kind == "transient-io") {
-                b.push_str("<p class=s-warn>Disconnects, unstable reads or transient errors point at the connection (port, cable, hub or card reader) as much as the media. Retest in another port or reader before blaming the flash.</p>");
+                b.push_str("<p class=s-warn>Disconnects and intermittent read errors can come from the drive or its connection. Retest with another port, cable or reader to help locate the fault.</p>");
             }
         }
         if !self.identity_changes.is_empty() {
-            b.push_str("<h2>Identity changes across replug</h2><ul>");
+            b.push_str("<h2>Identity changes after reconnecting</h2><ul>");
             for c in &self.identity_changes {
                 let _ = write!(b, "<li class=s-bad>{}</li>", esc(c));
             }
@@ -606,25 +619,33 @@ impl Report {
     /// identity, the evidence, timestamps and tool version.
     pub fn evidence_html(&self) -> String {
         let mut b = String::new();
-        let _ = write!(b, "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Flash drive test evidence</title><style>{CSS} @media print{{body{{max-width:none}}:root{{--bg:#fff;--fg:#000;--mut:#444;--card:#f3f3f3;--line:#ccc;--ok:#1a7f37;--bad:#c62828;--warn:#9a6700}}}}</style></head><body>");
-        b.push_str("<h1>Flash drive test evidence</h1>");
+        let identification_only = (self.command == "identify" || self.flash.is_some()) && self.probe.is_none() && self.write.is_empty() && self.verify.is_empty();
+        let title = if identification_only { "Flash identification evidence" } else { "Flash drive test evidence" };
+        let _ = write!(b, "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{title}</title><style>{CSS} @media print{{body{{max-width:none}}:root{{--bg:#fff;--fg:#000;--mut:#444;--card:#f3f3f3;--line:#ccc;--ok:#1a7f37;--bad:#c62828;--warn:#9a6700}}}}</style></head><body>");
+        let _ = write!(b, "<h1>{title}</h1>");
         let claimed = self.target.disk.as_ref().map(|d| d.size).unwrap_or(self.target.claimed);
         let real = self.real_capacity();
         let _ = write!(b, "<div class=card><div class=\"verdict {}\">{}: {}</div>", status_class(self.verdict.status), self.verdict.status.label(), esc(&self.verdict.headline));
-        let _ = write!(b, "<table><tr><th>Claimed capacity</th><td>{} ({claimed} bytes)</td></tr>", size(claimed));
+        b.push_str("<table>");
+        if !identification_only {
+            let _ = write!(b, "<tr><th>Claimed capacity</th><td>{} ({claimed} bytes)</td></tr>", size(claimed));
+        }
         if let Some(r) = real {
             let pct = if claimed > 0 { r as f64 * 100.0 / claimed as f64 } else { 0.0 };
-            let _ = write!(b, "<tr><th>Capacity that actually stores data</th><td><b>{}</b> ({r} bytes, {pct:.1}% of claimed)</td></tr>", size(r));
+            let _ = write!(b, "<tr><th>Estimated usable capacity</th><td><b>{}</b> ({r} bytes, {pct:.1}% of claimed)</td></tr>", size(r));
         }
-        let _ = write!(b, "<tr><th>Test</th><td>{} ({})</td></tr><tr><th>Started / finished</th><td>{} / {}</td></tr><tr><th>Tool</th><td>{}</td></tr></table></div>", esc(&self.command), esc(&self.target.mode), esc(&self.started), esc(&self.finished), esc(&self.tool));
-        let _ = write!(b, "<h2>Drive identity</h2><table>{}</table>", identity_rows(&self.target));
+        let operation = if identification_only { "Offline identification".to_string() } else { format!("{} ({})", self.command, self.target.mode) };
+        let operation_label = if identification_only { "Operation" } else { "Test" };
+        let _ = write!(b, "<tr><th>{operation_label}</th><td>{}</td></tr><tr><th>Started / finished</th><td>{} / {}</td></tr><tr><th>Tool</th><td>{}</td></tr></table></div>", esc(&operation), esc(&self.started), esc(&self.finished), esc(&self.tool));
+        let identity_label = if identification_only { "Input" } else { "Drive identity" };
+        let _ = write!(b, "<h2>{identity_label}</h2><table>{}</table>", identity_rows(&self.target));
         b.push_str("<h2>Evidence</h2><ul>");
         for d in &self.verdict.details {
             let _ = write!(b, "<li>{}</li>", esc(d));
         }
         if let Some(v) = self.verify.last() {
             let t = &v.tally;
-            let _ = write!(b, "<li>{} written and read back: {} intact, {} lost or corrupted.</li>", size(v.stats.bytes), size(t.ok * 512), size(t.lost() * 512));
+            let _ = write!(b, "<li>{} checked: {} intact, {} lost, missing or unreadable.</li>", size((t.ok + t.lost()) * 512), size(t.ok * 512), size(t.lost() * 512));
             if t.aliased > 0 {
                 let _ = write!(b, "<li>{} of data read back contained data written to a different position: the drive wraps around and overwrites itself.</li>", size(t.aliased * 512));
             }
@@ -639,10 +660,27 @@ impl Report {
         if let Some(p) = &self.probe {
             let _ = write!(b, "<h2>Capacity map</h2><p class=mut>Each cell is one test position across the claimed capacity, in order. Green: data stored and read back correctly. Red: data lost. Amber: data overwritten by a write to another position (wraparound).</p>{}", p.map_html());
         } else if let Some(v) = self.verify.last() {
-            b.push_str("<h2>Capacity map</h2>");
-            b.push_str(&tally_map_html(v));
+            b.push_str("<h2>Test coverage</h2><p class=mut>Green: checked without errors. Red: lost or unreadable data. Amber: data from another position. Gray: not checked or detailed results unavailable.</p>");
+            let span = self.tested.max(self.write.last().map_or(0, |w| w.end));
+            b.push_str(&tally_map_html(v, span));
         }
-        b.push_str("<h2>Method</h2><p>Every 512-byte sector was written with a unique pattern containing its own position and a random per-run tag, then read back and compared. A sector holding another position's pattern proves the drive maps several addresses to the same memory. The random tag rules out data left from earlier tests.</p>");
+        if self.command == "info" {
+            b.push_str("<h2>Method</h2><p>Identity reported by the operating system. No storage test was run. Reported capacity has not been verified.</p>");
+        } else if self.read_only || (self.target.mode == "raw" && (self.command == "scan" || (self.command == "bench" && self.bench.as_ref().is_some_and(|b| b.write.is_none())))) {
+            b.push_str("<h2>Method</h2><p>This operation opens the disk for reading only. No test data is written. See the result for the amount read and any errors. Reads cannot confirm usable capacity. Other programs using the disk can affect speed.</p>");
+        } else if identification_only {
+            b.push_str("<h2>Method</h2><p>This report uses a supplied NAND ID or saved device response, the built-in database and the chosen response layout. No device was queried or tested. Matching parts and identity fields cannot confirm usable capacity or whether the drive is genuine.</p>");
+        } else if self.verdict.status == Status::Refused {
+            b.push_str("<h2>Method</h2><p>The operation was refused before testing. No test data was written and capacity was not checked.</p>");
+        } else if self.probe.is_some() {
+            b.push_str("<h2>Method</h2><p>The capacity probe writes and reads selected positions across the available area. It estimates a capacity boundary when the samples show wraparound or a failed tail. Space between samples is not verified; a full write-and-verify test is needed to check it.</p>");
+        } else if self.command == "verify" {
+            b.push_str("<h2>Method</h2><p>Existing test data was read and compared with its expected pattern. This verification did not write new test data. See the result for the area checked and any errors.</p>");
+        } else if !self.write.is_empty() && !self.verify.is_empty() {
+            b.push_str("<h2>Method</h2><p>Test data uses 512-byte sectors containing their position and a random per-run tag. Reads compare the stored data with that pattern. A sector holding another position's pattern shows that writes reached the wrong address. See the result for the amount written and checked; cancelled or failed runs may cover only part of the target.</p>");
+        } else {
+            b.push_str("<h2>Method</h2><p>See the operation and result for the work completed. This report does not establish that the drive's full claimed capacity stores data.</p>");
+        }
         let _ = write!(b, "<p class=mut>Generated by {} on {}.</p></body></html>", esc(&self.tool), esc(&self.finished));
         b
     }
@@ -650,7 +688,7 @@ impl Report {
     /// Best estimate of the real capacity, if the test found the drive fake.
     pub fn real_capacity(&self) -> Option<u64> {
         if let Some(p) = &self.probe {
-            return Some(p.usable);
+            return (p.finding == "fake" && p.usable > 0).then_some(p.usable);
         }
         if self.verdict.status == Status::Fake
             && let Some(v) = self.verify.last() {
@@ -664,15 +702,20 @@ impl Report {
 }
 
 /// 200-cell map of good/bad regions from a verify tally.
-fn tally_map_html(v: &VerifyResult) -> String {
-    let total = v.stats.bytes.max(1);
+fn tally_map_html(v: &VerifyResult, span: u64) -> String {
+    let checked = v.tally.ok.saturating_add(v.tally.lost()).saturating_mul(512);
+    let total = span.max(checked).max(1);
+    let detailed = if v.tally.bad_ranges_truncated {
+        v.tally.bad_ranges.last().map_or(0, |r| r.end).min(checked)
+    } else { checked };
     let cells = 200u64;
     let mut s = String::from("<div class=map>");
     for i in 0..cells {
-        let (a, b) = (total * i / cells, total * (i + 1) / cells);
+        let (a, b) = ((total as u128 * i as u128 / cells as u128) as u64, (total as u128 * (i + 1) as u128 / cells as u128) as u64);
         let bad = v.tally.bad_ranges.iter().find(|r| r.start < b && r.end > a);
         let cls = match bad.map(|r| r.kind.as_str()) {
-            None => "p-ok",
+            None if b <= detailed && b > a => "p-ok",
+            None => "p-unknown",
             Some("aliased") => "p-alias",
             Some(_) => "p-bad",
         };

@@ -32,9 +32,22 @@ pub struct IopsResult {
 
 const IO: usize = 4096;
 
+pub fn iops_duration(secs: f64) -> io::Result<Duration> {
+    let duration = Duration::try_from_secs_f64(secs).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "IOPS duration must be finite and positive"))?;
+    if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "IOPS duration must be positive and within the clock's range"));
+    }
+    Ok(duration)
+}
+
 /// One random-I/O run: `qd` threads, each with its own handle, for `secs`.
 fn run_one(open: &(dyn Fn(bool) -> io::Result<File> + Sync), span: u64, write: bool, qd: u32, secs: f64, ctx: &Ctx) -> io::Result<IopsRow> {
-    let deadline = Instant::now() + Duration::from_secs_f64(secs);
+    let duration = iops_duration(secs)?;
+    if span < IO as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "IOPS needs at least 4 KiB"));
+    }
+    let started = Instant::now();
+    let deadline = started.checked_add(duration).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "IOPS duration is too large"))?;
     let blocks = span / IO as u64;
     let results: Vec<io::Result<Vec<f32>>> = std::thread::scope(|s| {
         let hs: Vec<_> = (0..qd)
@@ -52,9 +65,13 @@ fn run_one(open: &(dyn Fn(bool) -> io::Result<File> + Sync), span: u64, write: b
                         let off = (x % blocks) * IO as u64;
                         let t = Instant::now();
                         if write {
-                            pwrite(&f, &buf, off)?;
+                            if pwrite(&f, &buf, off)? != IO {
+                                return Err(io::Error::new(io::ErrorKind::WriteZero, "short IOPS write"));
+                            }
                         } else {
-                            pread(&f, &mut buf, off)?;
+                            if pread(&f, &mut buf, off)? != IO {
+                                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short IOPS read"));
+                            }
                         }
                         lat.push(t.elapsed().as_secs_f32() * 1000.0);
                     }
@@ -64,6 +81,7 @@ fn run_one(open: &(dyn Fn(bool) -> io::Result<File> + Sync), span: u64, write: b
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    let elapsed = started.elapsed().as_secs_f64();
     let mut lat = vec![];
     for r in results {
         lat.extend(r?);
@@ -71,7 +89,7 @@ fn run_one(open: &(dyn Fn(bool) -> io::Result<File> + Sync), span: u64, write: b
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = lat.len().max(1);
     let pct = |p: f64| lat.get(((n as f64 * p) as usize).min(n - 1)).copied().unwrap_or(0.0) as f64;
-    let iops = lat.len() as f64 / secs;
+    let iops = lat.len() as f64 / elapsed.max(1e-9);
     Ok(IopsRow {
         kind: if write { "write" } else { "read" }.into(),
         qd,
@@ -157,9 +175,9 @@ impl SmallFilesResult {
             format!("Renamed at {:.0} files/s, deleted at {:.0} files/s, verified {} files at {:.0} files/s", self.rename_per_s, self.delete_per_s, self.verified, self.verify_per_s),
         ];
         if self.ok() {
-            v.push("Every file has the right name and content; deleted and renamed files are gone.".into());
+            v.push("File names and contents match. Deleted files and old names are gone.".into());
         } else {
-            v.push(format!("{} files with wrong content, {} missing, {} that should be gone are still there", self.bad_content, self.missing, self.leftovers));
+            v.push(format!("Incorrect contents: {} files. Missing: {}. Left after deletion or renaming: {}.", self.bad_content, self.missing, self.leftovers));
             for e in self.errors.iter().take(10) {
                 v.push(format!("  {e}"));
             }
@@ -187,8 +205,7 @@ pub fn run_small_files(dir: &Path, count: u64, ctx: &Ctx) -> SmallFilesResult {
     let mut r = SmallFilesResult::default();
     let tag = new_tag();
     let pat = Pattern::Seeded { tag };
-    let _ = std::fs::remove_dir_all(dir);
-    if let Err(e) = crate::fulltest::make_dir(dir) {
+    if let Err(e) = crate::fulltest::remove_data_dir(dir).and_then(|_| crate::fulltest::make_dir(dir)) {
         r.errors.push(format!("cannot create {}: {e}", dir.display()));
         return r;
     }
@@ -308,6 +325,9 @@ impl BenchResult {
 
 /// Read `[0, len)` sequentially and time it (raw read-only benchmark).
 pub fn seq_read(dev: &mut dyn crate::dev::Dev, len: u64, block: usize, ctx: &Ctx) -> io::Result<crate::engine::IoStats> {
+    if len == 0 || block == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "read size and block size must be positive"));
+    }
     let mut st = crate::engine::IoStats::default();
     let mut buf = AlignedBuf::new(block);
     ctx.phase("Sequential read", len);
@@ -319,8 +339,8 @@ pub fn seq_read(dev: &mut dyn crate::dev::Dev, len: u64, block: usize, ctx: &Ctx
         let secs = t.elapsed().as_secs_f64();
         st.record(off, got, secs);
         ctx.sample(off, got as f64 / 1e6 / secs.max(1e-9));
-        if got == 0 {
-            break;
+        if got != n {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("short read at {off}: received {got} of {n} bytes")));
         }
         off += got as u64;
         ctx.progress(off);

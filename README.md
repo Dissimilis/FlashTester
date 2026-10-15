@@ -138,7 +138,7 @@ Cheap fakes ignore the high address bits, so writes past the real capacity wrap 
 ## Tested
 
 - **Windows 11:** USB sticks, an NVMe SSD in a USB enclosure, and throwaway VHDs (`test\vhd-test.ps1`).
-- **Linux on hardware:** Debian 13 (OpenMediaVault) and Fedora 44 on x86_64; Armbian on ODROID C2 and N2+ and Ubuntu 26.04 on AWS Graviton4, all aarch64.
+- **Linux on hardware:** Debian 13 (OpenMediaVault) and Fedora 44 on x86_64; Armbian on ODROID C2 and N2+, Ubuntu 26.04 on AWS Graviton4 and OpenWrt 23.05 on a GL.iNet Flint 3e router, all aarch64.
 - **Linux in QEMU/KVM** with a real USB stick passed through, installed or booted live from a USB stick: AlmaLinux 10, Alpine 3.24, Arch, Bazzite, Chimera, Debian (on RAID, LUKS and LVM), EndeavourOS, Gentoo, Guix System 1.5, Kali 2026.2, Linux Mint 22, Manjaro, NixOS 26.05, OpenWrt (x86), openSUSE Tumbleweed, Rocky Linux 10, Slackware, SystemRescue, Tiny Core 17, Ubuntu 22.04 and 26.04, Void (glibc and musl) and Zorin OS 18. Kernels 5.15 to 7.2.
 - **Docker:** works with `docker run --privileged -v /dev:/dev`. Without the host's `/dev`, FlashTester can't tell which disks the host uses and refuses all of them.
 - **FreeBSD** in QEMU/KVM: 13.5, 14.4, 14.5, 15.0, 15.1 and 16.0-CURRENT.

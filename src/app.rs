@@ -198,10 +198,10 @@ fn run_probe(w: &Where, ctx: &Ctx) -> Report {
             }
             if p.finding == "fake"
                 && let Where::Disk(d) = w {
-                    rep.verdict.details.push(format!("Make the drive usable at its real size: flashtester fix --disk {} --size {} --destroy", d.id, p.usable));
+                    rep.verdict.details.push(format!("Make the drive usable at its real size: {}", platform::fix_hint(&d.id, Some(p.usable))));
                 }
             if let Where::Disk(d) = w {
-                rep.notes.push(format!("The probe overwrote the partition table. Recreate it with: flashtester fix --disk {} --destroy", d.id));
+                rep.notes.push(format!("The probe overwrote the partition table. Recreate it with: {}", platform::fix_hint(&d.id, None)));
             }
             rep.probe = Some(p);
         }
@@ -423,7 +423,7 @@ fn bench(w: &Where, len: u64, write: bool, ctx: &Ctx) -> Report {
     }
     if write
         && let Where::Disk(d) = w {
-            rep.notes.push(format!("The start of disk {} was overwritten. Recreate a file system with: flashtester fix --disk {} --destroy", d.id, d.id));
+            rep.notes.push(format!("The start of disk {} was overwritten. Recreate a file system with: {}", d.id, platform::fix_hint(&d.id, None)));
         }
     rep.finish(t0);
     rep

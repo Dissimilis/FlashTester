@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
-use std::{fs::File, io, process::Command};
+use std::fs::File;
 
 #[cfg(windows)]
 mod windows;
@@ -23,6 +23,11 @@ pub mod x11gui;
 mod freebsd;
 #[cfg(target_os = "freebsd")]
 pub use freebsd::*;
+
+#[cfg(target_os = "haiku")]
+mod haiku;
+#[cfg(target_os = "haiku")]
+pub use haiku::*;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct UsbInfo {
@@ -141,6 +146,17 @@ pub struct Ata {
     pub lba_high: u8,
 }
 
+/// How to make a wiped disk usable again, optionally at its real size in bytes:
+/// our `fix` command, or DriveSetup on Haiku, which has no command-line partitioner.
+pub fn fix_hint(id: &str, size: Option<u64>) -> String {
+    match (cfg!(target_os = "haiku"), size) {
+        (true, Some(s)) => format!("DriveSetup, with one partition of at most {s} bytes"),
+        (true, None) => "DriveSetup".into(),
+        (false, Some(s)) => format!("flashtester fix --disk {id} --size {s} --destroy"),
+        (false, None) => format!("flashtester fix --disk {id} --destroy"),
+    }
+}
+
 /// Partition device for partition 1 of a Linux disk (sda -> sda1, nvme0n1 -> nvme0n1p1).
 pub fn first_partition(disk_path: &str) -> String {
     if disk_path.ends_with(|c: char| c.is_ascii_digit()) { format!("{disk_path}p1") } else { format!("{disk_path}1") }
@@ -173,6 +189,7 @@ fn sniff_fs(dev: &str) -> Option<String> {
         (82, b"FAT32   ", "vfat"),
         (54, b"FAT1", "vfat"),
         (0, b"XFSB", "xfs"),
+        (544, b"1SFB", "bfs"),
         (0, b"LUKS\xba\xbe", "crypto_LUKS"),
         (0, b"hsqs", "squashfs"),
         (1080, &[0x53, 0xef], "ext"),
@@ -199,12 +216,12 @@ fn sniff_fs(dev: &str) -> Option<String> {
     Some(if flag(0x60) & 0x40 != 0 { "ext4" } else if flag(0x5c) & 4 != 0 { "ext3" } else { "ext2" }.into())
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn run(cmd: &str, args: &[&str], input: Option<&str>) -> Result<String, String> {
     use std::io::Write;
-    let mut c = Command::new(cmd);
+    let mut c = std::process::Command::new(cmd);
     c.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut child = c.spawn().map_err(|e| if e.kind() == io::ErrorKind::NotFound { format!("{cmd} is not installed") } else { format!("cannot run {cmd}: {e}") })?;
+    let mut child = c.spawn().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { format!("{cmd} is not installed") } else { format!("cannot run {cmd}: {e}") })?;
     if let Some(i) = input {
         child.stdin.take().unwrap().write_all(i.as_bytes()).map_err(|e| e.to_string())?;
     }

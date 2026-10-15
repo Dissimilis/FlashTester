@@ -1,6 +1,6 @@
 //! Command-line front-end. Every function of the app is reachable from here.
 
-use crate::app::{self, FixSize, Job};
+use crate::app::{self, Job};
 use crate::ctx::Ctx;
 use crate::fulltest::{TestOpts, Where};
 use crate::platform;
@@ -53,7 +53,7 @@ const DEFAULT_FS: &str = if cfg!(target_os = "freebsd") { "fat32" } else { "exfa
 struct TargetArg {
     /// Drive letter or folder, e.g. E: (file mode).
     path: Option<String>,
-    /// Disk from `flashtester list` (raw mode): a number on Windows, sdb / nvme1n1 on Linux, da0 / ada1 on FreeBSD.
+    /// Disk from `flashtester list` (raw mode): a number on Windows, sdb / nvme1n1 on Linux, da0 / ada1 on FreeBSD, usb/0/0 on Haiku.
     #[arg(long, conflicts_with = "path")]
     disk: Option<String>,
 }
@@ -334,14 +334,15 @@ fn list(json: bool) -> i32 {
     if !platform::is_admin() {
         println!("(not elevated: raw-disk commands need an administrator terminal)\n");
     }
-    println!("{:<8} {:<10} {:<6} {:<28} {:<34} {:<12} Status", "Disk", "Size", "Bus", "Name", "Link", "Volumes");
+    let w = disks.iter().map(|d| d.id.len()).max().unwrap_or(0).max(8);
+    println!("{:<w$} {:<10} {:<6} {:<28} {:<34} {:<12} Status", "Disk", "Size", "Bus", "Name", "Link", "Volumes");
     for d in &disks {
         let link = d.usb.as_ref().map(|u| format!("{}:{} {}", u.vid, u.pid, u.link.split(" (").next().unwrap_or(""))).unwrap_or_default();
         let status = match &d.protected {
             Some(p) => format!("PROTECTED: {p}"),
             None => "can be tested".into(),
         };
-        println!("{:<8} {:<10} {:<6} {:<28} {:<34} {:<12} {}", d.id, size(d.size), d.bus, d.name(), link, d.letters(), status);
+        println!("{:<w$} {:<10} {:<6} {:<28} {:<34} {:<12} {}", d.id, size(d.size), d.bus, d.name(), link, d.letters(), status);
     }
     0
 }
@@ -442,7 +443,7 @@ fn info(t: &TargetArg, json: bool) -> i32 {
         } else {
             ""
         };
-        println!("  Link:     {}{note}", u.link);
+        println!("  Link:     {}{note}", if u.link.is_empty() { "(unknown)" } else { &u.link });
         println!("  USB serial: {}", u.serial.as_deref().unwrap_or("(none)"));
     }
     println!("  Device:   {}", d.instance_id);
@@ -532,13 +533,16 @@ fn build_job(cmd: &Cmd) -> Result<Job, String> {
         }
         Cmd::SmallFiles { path, count, keep } => Job::SmallFiles { w: app::resolve_path(path)?, count: *count, keep: *keep },
         Cmd::PlugPull { path, checkpoint } => Job::PlugPull { w: app::resolve_path(path)?, checkpoint: parse_size(checkpoint)?.max(1 << 20) },
+        #[cfg(target_os = "haiku")]
+        Cmd::Fix { .. } => return Err(platform::NO_FIX.into()),
+        #[cfg(not(target_os = "haiku"))]
         Cmd::Fix { disk, size, fs, label, destroy } => {
             let w = app::resolve_disk(disk)?;
             need_destroy(*destroy, &w)?;
             let sz = match size.to_ascii_lowercase().as_str() {
-                "probe" => FixSize::Probe,
-                "full" | "whole" => FixSize::Whole,
-                s => FixSize::Bytes(parse_size(s)?),
+                "probe" => app::FixSize::Probe,
+                "full" | "whole" => app::FixSize::Whole,
+                s => app::FixSize::Bytes(parse_size(s)?),
             };
             let Where::Disk(d) = w else { unreachable!() };
             Job::Fix { disk: d, size: sz, fs: fs.clone(), label: label.clone() }

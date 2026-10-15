@@ -19,6 +19,12 @@ pub const MIB: u64 = 1 << 20;
 pub const GIB: u64 = 1 << 30;
 pub const FILE_SIZE: u64 = GIB;
 
+/// Haiku's O_DIRECT (fcntl.h), which the libc crate does not define.
+#[cfg(target_os = "haiku")]
+const O_DIRECT: i32 = 0x0010_0000;
+#[cfg(all(unix, not(target_os = "haiku")))]
+use libc::O_DIRECT;
+
 pub const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
 pub const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
 
@@ -31,7 +37,7 @@ pub fn direct(o: &mut OpenOptions, write_through: bool) -> &mut OpenOptions {
     }
     #[cfg(unix)]
     {
-        o.custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW | if write_through { libc::O_DSYNC } else { 0 })
+        o.custom_flags(O_DIRECT | libc::O_NOFOLLOW | if write_through { libc::O_DSYNC } else { 0 })
     }
 }
 

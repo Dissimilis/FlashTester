@@ -335,7 +335,7 @@ pub fn target_line(t: &Target) -> String {
     if let Some(d) = &t.disk {
         parts.push(format!("disk {} {} ({}, {})", d.id, d.name(), size(d.size), d.bus));
         if let Some(u) = &d.usb {
-            parts.push(format!("USB {}:{} at {}", u.vid, u.pid, u.link));
+            parts.push(if u.link.is_empty() { format!("USB {}:{}", u.vid, u.pid) } else { format!("USB {}:{} at {}", u.vid, u.pid, u.link) });
         }
     }
     if let Some(v) = &t.volume {

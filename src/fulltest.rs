@@ -342,9 +342,10 @@ pub fn run_test(w: &Where, o: &TestOpts, ctx: &Ctx) -> Report {
         && rep.tested > 0 {
             rep.notes.push(format!("Test data kept in {}; check it again later with: flashtester verify {}", data_dir(root).display(), root.display()));
         }
-    if let Where::Disk(d) = w {
-        rep.notes.push(format!("Disk {} no longer has a usable file system. Recreate one with: flashtester fix --disk {} --destroy", d.id, d.id));
-    }
+    if let Where::Disk(d) = w
+        && !rep.write.is_empty() {
+            rep.notes.push(format!("Disk {} no longer has a usable file system. Recreate one with: {}", d.id, crate::platform::fix_hint(&d.id, None)));
+        }
     if let (Where::Dir { vol, .. }, Some(_)) = (w, rep.verify.last())
         && rep.tested < vol.size / 10 * 9 && rep.verdict.status == Status::Ok {
             let why = if o.size.is_some() { "limited by --size" } else { "the rest is in use" };
@@ -554,6 +555,12 @@ mod tests {
         rep
     }
 
+    /// The OS's own I/O error code (Haiku's errno values are negative).
+    #[cfg(windows)]
+    const EIO: i32 = 1117;
+    #[cfg(unix)]
+    const EIO: i32 = libc::EIO;
+
     /// Reads beyond `real` fail with an I/O error (some fakes do this).
     struct ErrBeyond(MemDev, u64);
     impl crate::dev::Dev for ErrBeyond {
@@ -564,7 +571,7 @@ mod tests {
             self.0.write_at(off, buf)
         }
         fn read_at(&mut self, off: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-            if off >= self.1 { Err(std::io::Error::from_raw_os_error(if cfg!(windows) { 1117 } else { 5 })) } else { self.0.read_at(off, buf) }
+            if off >= self.1 { Err(std::io::Error::from_raw_os_error(EIO)) } else { self.0.read_at(off, buf) }
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())

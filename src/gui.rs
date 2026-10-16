@@ -25,6 +25,8 @@ enum Sel {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
+    Backup,
+    Restore,
     Info,
     Test,
     Endurance,
@@ -85,6 +87,27 @@ mod operation_tests {
     }
 
     #[test]
+    fn disk_restore_requires_confirmation_of_the_resolved_device() {
+        use super::*;
+        let mut gui = Gui::new();
+        let disk = DiskInfo { id: "3".into(), instance_id: "confirmed-device".into(), serial: "serial-a".into(), size: 4096, ..Default::default() };
+        gui.sel = Some(Sel::Disk(disk.id.clone()));
+        gui.disks = vec![disk.clone()];
+        let restore = |d| Job::Restore { w: Where::Disk(d), path: "backup.img".into(), folder: None };
+        assert!(!gui.confirmation_matches(&restore(disk.clone())));
+        gui.confirm = true;
+        assert!(gui.confirmation_matches(&restore(disk.clone())));
+        let mut swapped = disk.clone();
+        swapped.instance_id = "replacement-device".into();
+        assert!(!gui.confirmation_matches(&restore(swapped)));
+        let mut changed = disk;
+        changed.serial = "serial-b".into();
+        assert!(!gui.confirmation_matches(&restore(changed)));
+        gui.sel = None;
+        assert!(!gui.confirmation_matches(&restore(DiskInfo::default())));
+    }
+
+    #[test]
     fn disconnected_drive_keeps_its_completed_report() {
         use super::*;
         let mut gui = Gui::new();
@@ -104,6 +127,8 @@ mod operation_tests {
 impl Kind {
     fn name(self) -> &'static str {
         match self {
+            Kind::Backup => "Create backup",
+            Kind::Restore => "Restore backup",
             Kind::Info => "Drive details",
             Kind::Test => "Full test",
             Kind::Endurance => "Repeated write test",
@@ -119,6 +144,8 @@ impl Kind {
     }
     fn start_label(self) -> &'static str {
         match self {
+            Kind::Backup => "Create backup",
+            Kind::Restore => "Restore files",
             Kind::Info => "Drive details",
             Kind::Test => "Start full test",
             Kind::Endurance => "Start repeated test",
@@ -134,6 +161,7 @@ impl Kind {
     }
     fn group(self) -> &'static str {
         match self {
+            Kind::Backup | Kind::Restore => "Backup and restore",
             Kind::Info => "Information",
             Kind::Scan => "Read checks",
             Kind::Test | Kind::Probe | Kind::Verify => "Capacity and data loss",
@@ -144,6 +172,10 @@ impl Kind {
     }
     fn help(self, raw: bool) -> &'static str {
         match (self, raw) {
+            (Kind::Backup, false) => "Save files and folders in one ZIP archive, then check their checksums. Keeps file contents and modification times. Store the backup on another disk.",
+            (Kind::Backup, true) => "Save every sector in a disk image, including partitions, boot records and unused space. Needs as much space as the whole source disk. Close programs using the drive; on Linux, unmount it first.",
+            (Kind::Restore, false) => "Check a FlashTester ZIP backup, restore it into a new folder on this volume, then check the restored files. Existing folders are refused.",
+            (Kind::Restore, true) => "Check a FlashTester disk image, overwrite this disk with it, then read it back to verify. Keep the .img.json manifest alongside the image. On Linux, unmount the destination first.",
             (Kind::Info, _) => "Read the device identity reported by the operating system.",
             (Kind::Test, false) => "Write test data into free space, then read it back and check for errors. Stops early if later writes overwrite earlier data. A fake drive can also overwrite your files.",
             (Kind::Test, true) => "Write test data across the whole disk, then read it back and check for errors. Erases all files and partitions.",
@@ -171,13 +203,13 @@ impl Kind {
         if protected {
             &[Kind::Info, Kind::Bench, Kind::Scan]
         } else if raw {
-            &[Kind::Info, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
+            &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
         } else {
-            &[Kind::Info, Kind::Test, Kind::Probe, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
+            &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Test, Kind::Probe, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
         }
     }
     fn erases(self, raw: bool) -> bool {
-        raw && matches!(self, Kind::Test | Kind::Endurance | Kind::Probe | Kind::Fix)
+        raw && matches!(self, Kind::Test | Kind::Endurance | Kind::Probe | Kind::Fix | Kind::Restore)
     }
     fn needs_admin(self, raw: bool) -> bool {
         self != Kind::Info && (raw || self == Kind::Probe)
@@ -242,6 +274,8 @@ pub struct Gui {
     sel: Option<Sel>,
     kind: Kind,
     size_limit: String,
+    backup_path: String,
+    restore_folder: String,
     passes: u32,
     replug: bool,
     count: u64,
@@ -277,6 +311,8 @@ impl Gui {
             sel: None,
             kind: Kind::Info,
             size_limit: String::new(),
+            backup_path: String::new(),
+            restore_folder: "Restored files".into(),
             passes: 0,
             replug: false,
             count: 5000,
@@ -339,7 +375,7 @@ impl Gui {
     }
 
     fn read_only(&self) -> bool {
-        self.kind == Kind::Info || (self.raw() && matches!(self.kind, Kind::Scan | Kind::Bench | Kind::Verify | Kind::Iops))
+        matches!(self.kind, Kind::Info | Kind::Backup) || (self.raw() && matches!(self.kind, Kind::Scan | Kind::Bench | Kind::Verify | Kind::Iops))
     }
 
     fn raw(&self) -> bool {
@@ -388,6 +424,8 @@ impl Gui {
         let size = if self.size_limit.trim().is_empty() { None } else { Some(crate::cli::parse_size(&self.size_limit)?) };
         let opts = |passes| TestOpts { size, passes, ..Default::default() };
         Ok(match self.kind {
+            Kind::Backup => Job::Backup { w, path: PathBuf::from(self.backup_path.trim().trim_matches('"')) },
+            Kind::Restore => Job::Restore { w, path: PathBuf::from(self.backup_path.trim().trim_matches('"')), folder: if self.raw() { None } else { Some(PathBuf::from(self.restore_folder.trim())) } },
             Kind::Info => return Err("Select a read check or test first.".into()),
             Kind::Test => Job::Test { w, o: TestOpts { replug: self.replug, ..opts(1) } },
             Kind::Endurance => Job::Test { w, o: opts(self.passes) },
@@ -432,7 +470,14 @@ impl Gui {
     }
 
     fn can_start(&self) -> bool {
+        if matches!(self.kind, Kind::Backup | Kind::Restore) && (self.backup_path.trim().is_empty() || (self.kind == Kind::Restore && !self.raw() && self.restore_folder.trim().is_empty())) {
+            return false;
+        }
         self.kind != Kind::Info && Kind::for_target(self.raw(), self.protected()).contains(&self.kind) && self.sel_disk().is_some() && (!self.uses_size() || self.size_error().is_none()) && (!self.destructive() || self.confirm) && (!self.needs_admin() || self.admin)
+    }
+
+    fn confirmation_matches(&self, job: &Job) -> bool {
+        self.confirm && self.sel_disk().zip(job.disk()).is_some_and(|(shown, resolved)| shown.check_identity(resolved).is_ok())
     }
 
     fn start(&mut self) {
@@ -445,13 +490,7 @@ impl Gui {
             }
         };
         // The user confirmed the disk shown; refuse if the number now means another disk.
-        let confirmed = self.sel_disk().map(|d| d.instance_id.clone());
-        let resolved = match &job {
-            Job::Test { w, .. } | Job::Probe { w } | Job::Iops { w, .. } => w.disk().map(|d| d.instance_id.clone()),
-            Job::Fix { disk, .. } => Some(disk.instance_id.clone()),
-            _ => confirmed.clone(),
-        };
-        if job.destructive() && (!self.confirm || resolved != confirmed) {
+        if job.destructive() && !self.confirmation_matches(&job) {
             self.error = Some("The selected disk changed; refresh and confirm again.".into());
             self.refresh();
             return;
@@ -841,7 +880,9 @@ impl Gui {
         let h = avail.height().max(460.0);
         let left = Rect::from_min_size(avail.min, vec2(290.0, h));
         let right = Rect::from_min_max(pos2(left.right() + 20.0, avail.top()), pos2(avail.right(), avail.top() + h));
-        self.test_list(&mut ui.new_child(UiBuilder::new().max_rect(left)), raw);
+        egui::ScrollArea::vertical().id_salt("operation-list").max_height(h).show(&mut ui.new_child(UiBuilder::new().max_rect(left)), |ui| {
+            self.test_list(ui, raw);
+        });
         ui.painter().rect(right, 6.0, k::PANEL, Stroke::new(1.0, k::LINE_CARD), StrokeKind::Inside);
         self.test_detail(&mut ui.new_child(UiBuilder::new().max_rect(right.shrink(20.0))), raw);
         ui.allocate_rect(Rect::from_min_size(avail.min, vec2(avail.width(), h)), Sense::hover());
@@ -867,7 +908,7 @@ impl Gui {
                 smart = self.identity(ui);
             });
         let r = resp.response.rect;
-        mode_band(ui, Rect::from_min_size(r.min, vec2(r.width(), 30.0)).shrink(1.0), raw, self.read_only(), self.protected(), CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 }, None);
+        mode_band(ui, Rect::from_min_size(r.min, vec2(r.width(), 30.0)).shrink(1.0), raw, self.read_only(), self.protected(), matches!(self.kind, Kind::Backup | Kind::Restore), CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 }, None);
         smart
     }
 
@@ -979,7 +1020,7 @@ impl Gui {
         Frame::new().fill(k::HINT).stroke(Stroke::new(1.0, k::LINE_CARD)).corner_radius(4).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let hint =
-                if self.protected() { "Read checks do not write test data. They cannot confirm usable capacity." } else { "Check drive details, then choose a test." };
+                if self.protected() { "Read checks do not write test data. They cannot confirm usable capacity." } else { "Choose drive details, a backup operation or a test." };
             ui.add(Label::new(k::text(hint, 12.0, k::TEXT2)).wrap());
         });
         ui.add_space(4.0);
@@ -1121,8 +1162,8 @@ impl Gui {
                     ui.allocate_ui_with_layout(vec2(text_w, 10.0), Layout::top_down(Align::Min), |ui| {
                         ui.set_width(text_w);
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(k::medium(format!("This test needs {ADMIN} rights"), 14.0, k::WARN_TEXT));
-                        ui.add(Label::new(k::text("After restarting, select the drive and test again.", 12.0, k::WARN_SUB)).wrap());
+                        ui.label(k::medium(format!("This operation needs {ADMIN} rights"), 14.0, k::WARN_TEXT));
+                        ui.add(Label::new(k::text("After restarting, select the drive and operation again.", 12.0, k::WARN_SUB)).wrap());
                     });
                     relaunch = k::button(ui, Look::Amber, None, &label, 32.0, 13.0, true).clicked();
                 });
@@ -1167,6 +1208,19 @@ impl Gui {
 
     fn options(&mut self, ui: &mut egui::Ui) {
         match self.kind {
+            Kind::Backup | Kind::Restore => {
+                ui.label(k::text(if self.kind == Kind::Backup { "Save backup as (on another disk)" } else { "Backup file (on another disk)" }, 12.0, k::TEXT2));
+                let hint = match (cfg!(windows), self.raw()) {
+                    (true, true) => "C:\\Backups\\drive.img", (true, false) => "C:\\Backups\\files.zip",
+                    (false, true) => "/home/user/backups/drive.img", (false, false) => "/home/user/backups/files.zip",
+                };
+                ui.add(egui::TextEdit::singleline(&mut self.backup_path).desired_width(f32::INFINITY).hint_text(hint));
+                if self.kind == Kind::Restore && !self.raw() {
+                    ui.label(k::text("New folder on the selected volume", 12.0, k::TEXT2));
+                    ui.add(egui::TextEdit::singleline(&mut self.restore_folder).desired_width(f32::INFINITY));
+                }
+                ui.add(Label::new(k::text(if self.raw() { "Select a volume in the drive list for a file-level ZIP backup instead." } else { "Select the whole disk in the drive list for a byte-for-byte image instead." }, 12.0, k::TEXT3)).wrap());
+            }
             Kind::Test | Kind::Endurance => {
                 self.size_field(ui, "Size limit", "Leave blank to test all available space. Examples: 8G, 500M");
                 if self.kind == Kind::Endurance {
@@ -1250,6 +1304,8 @@ impl Gui {
         let fake = "Back up your files first. A fake drive can overwrite them during this test.";
         let id = self.sel_disk().map(|d| d.id.clone()).unwrap_or_default();
         let s = match (self.kind, raw) {
+            (Kind::Backup, _) => "Reads the selected source and saves a new backup on another disk.".into(),
+            (Kind::Restore, false) => "Restores into a new folder. Existing files are never overwritten.".into(),
             (Kind::Test | Kind::Endurance, false) => {
                 format!("Writes up to {} into free space. {fake}", size(limit))
             }
@@ -1275,7 +1331,7 @@ impl Gui {
         if self.kind == Kind::Test && self.replug {
             test += ", reconnect before checking data";
         }
-        mode_band(ui, rect, self.raw(), self.read_only(), self.protected(), CornerRadius::same(4), Some((self.target_text(), test)));
+        mode_band(ui, rect, self.raw(), self.read_only(), self.protected(), matches!(self.kind, Kind::Backup | Kind::Restore), CornerRadius::same(4), Some((self.target_text(), test)));
     }
 
     // ---- run view ----
@@ -1292,7 +1348,9 @@ impl Gui {
             }
         }
         let cells = gui_map::live(&s, &self.curves, self.raw() && matches!(self.kind, Kind::Scan | Kind::Bench));
-        self.viz_row(ui, cells.as_deref(), "Block map", None);
+        if !matches!(self.kind, Kind::Backup | Kind::Restore) {
+            self.viz_row(ui, cells.as_deref(), "Block map", None);
+        }
         self.live = s;
         self.log_bar(ui, true);
     }
@@ -1525,7 +1583,9 @@ impl Gui {
         let mut act = self.verdict(ui, &rep);
         let cells = gui_map::from_report(&rep);
         let capacity = rep.probe.as_ref().map(|p| (p.usable.min(p.claimed), p.claimed));
-        self.viz_row(ui, cells.as_deref(), "Final block map", capacity);
+        if !matches!(self.kind, Kind::Backup | Kind::Restore) {
+            self.viz_row(ui, cells.as_deref(), "Final block map", capacity);
+        }
 
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
@@ -1534,7 +1594,8 @@ impl Gui {
                 if k::button(ui, Look::Secondary, Some(Icon::Download), "Save detailed report", 32.0, 13.0, true).clicked() {
                     act = Some(Act::Save(false));
                 }
-                if k::button(ui, Look::Secondary, Some(Icon::FileText), "Save evidence sheet", 32.0, 13.0, true).clicked() {
+                let summary_label = if matches!(self.kind, Kind::Backup | Kind::Restore) { "Save summary" } else { "Save evidence sheet" };
+                if k::button(ui, Look::Secondary, Some(Icon::FileText), summary_label, 32.0, 13.0, true).clicked() {
                     act = Some(Act::Save(true));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1542,11 +1603,11 @@ impl Gui {
                         .horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             k::icon(ui, if self.summary_open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.0, k::TEXT2);
-                            ui.label(k::text("Test details", 12.0, k::TEXT2));
+                            ui.label(k::text("Operation details", 12.0, k::TEXT2));
                         })
                         .response;
                     let r = ui.interact(r.rect, egui::Id::new("summary-toggle"), Sense::click());
-                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, "Test details"));
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, "Operation details"));
                     k::pointer_on_hover(&r);
                     if r.clicked() {
                         self.summary_open = !self.summary_open;
@@ -1650,7 +1711,7 @@ impl Gui {
                                 b(Look::Plain, "Choose another drive", Act::ChooseDrive);
                             }
                             _ => {
-                                b(Look::Outline(stroke), "Run another test", Act::Again);
+                                b(Look::Outline(stroke), "Choose another operation", Act::Again);
                                 b(Look::Plain, "Choose another drive", Act::ChooseDrive);
                             }
                         }
@@ -1691,12 +1752,19 @@ fn saved_report_row(ui: &mut egui::Ui, path: &std::path::Path) -> Option<PathBuf
 }
 
 /// A file-mode / raw-mode strip. With `slim`, it also carries the target and test name.
-fn mode_band(ui: &egui::Ui, rect: Rect, raw: bool, read_only: bool, protected: bool, radius: CornerRadius, slim: Option<((String, String), String)>) {
+fn mode_band(ui: &egui::Ui, rect: Rect, raw: bool, read_only: bool, protected: bool, transfer: bool, radius: CornerRadius, slim: Option<((String, String), String)>) {
     let (fill, fg, stroke) = if raw && !read_only { (k::DANGER_TINT, k::DANGER_BAND, k::DANGER_STROKE) } else { (k::SEL, k::LINK_LIGHT, k::LINE) };
     let p = ui.painter();
     let cy = rect.center().y;
     let (label, line) = if protected {
         ("Protected drive (read only)", "Writes and file tests are blocked.")
+    } else if transfer {
+        match (raw, read_only) {
+            (true, true) => ("Disk image backup", "Reads every sector; stores the image on another disk."),
+            (true, false) => ("Disk image restore", "Overwrites the destination disk."),
+            (false, true) => ("File backup", "Reads files into a ZIP archive on another disk."),
+            (false, false) => ("File restore", "Restores files into a new folder."),
+        }
     } else if read_only {
         ("Read only", "No test data is written to the drive.")
     } else if raw {

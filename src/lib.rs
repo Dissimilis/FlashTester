@@ -1,4 +1,5 @@
 pub mod app;
+pub mod backup;
 pub mod cli;
 pub mod ctx;
 pub mod dev;

@@ -620,7 +620,8 @@ impl Report {
     pub fn evidence_html(&self) -> String {
         let mut b = String::new();
         let identification_only = (self.command == "identify" || self.flash.is_some()) && self.probe.is_none() && self.write.is_empty() && self.verify.is_empty();
-        let title = if identification_only { "Flash identification evidence" } else { "Flash drive test evidence" };
+        let transfer = matches!(self.command.as_str(), "backup" | "restore");
+        let title = if transfer { "Backup and restore summary" } else if identification_only { "Flash identification evidence" } else { "Flash drive test evidence" };
         let _ = write!(b, "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{title}</title><style>{CSS} @media print{{body{{max-width:none}}:root{{--bg:#fff;--fg:#000;--mut:#444;--card:#f3f3f3;--line:#ccc;--ok:#1a7f37;--bad:#c62828;--warn:#9a6700}}}}</style></head><body>");
         let _ = write!(b, "<h1>{title}</h1>");
         let claimed = self.target.disk.as_ref().map(|d| d.size).unwrap_or(self.target.claimed);
@@ -635,7 +636,7 @@ impl Report {
             let _ = write!(b, "<tr><th>Estimated usable capacity</th><td><b>{}</b> ({r} bytes, {pct:.1}% of claimed)</td></tr>", size(r));
         }
         let operation = if identification_only { "Offline identification".to_string() } else { format!("{} ({})", self.command, self.target.mode) };
-        let operation_label = if identification_only { "Operation" } else { "Test" };
+        let operation_label = if identification_only || transfer { "Operation" } else { "Test" };
         let _ = write!(b, "<tr><th>{operation_label}</th><td>{}</td></tr><tr><th>Started / finished</th><td>{} / {}</td></tr><tr><th>Tool</th><td>{}</td></tr></table></div>", esc(&operation), esc(&self.started), esc(&self.finished), esc(&self.tool));
         let identity_label = if identification_only { "Input" } else { "Drive identity" };
         let _ = write!(b, "<h2>{identity_label}</h2><table>{}</table>", identity_rows(&self.target));
@@ -664,7 +665,9 @@ impl Report {
             let span = self.tested.max(self.write.last().map_or(0, |w| w.end));
             b.push_str(&tally_map_html(v, span));
         }
-        if self.command == "info" {
+        if transfer {
+            b.push_str("<h2>Method</h2><p>Backup or restore with SHA-256 integrity checks. See the result for completion status and limitations. This operation does not test the drive's usable capacity.</p>");
+        } else if self.command == "info" {
             b.push_str("<h2>Method</h2><p>Identity reported by the operating system. No storage test was run. Reported capacity has not been verified.</p>");
         } else if self.read_only || (self.target.mode == "raw" && (self.command == "scan" || (self.command == "bench" && self.bench.as_ref().is_some_and(|b| b.write.is_none())))) {
             b.push_str("<h2>Method</h2><p>This operation opens the disk for reading only. No test data is written. See the result for the amount read and any errors. Reads cannot confirm usable capacity. Other programs using the disk can affect speed.</p>");

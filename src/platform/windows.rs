@@ -485,7 +485,7 @@ pub fn disk(id: &str) -> io::Result<DiskInfo> {
 pub fn check_disk(n: &str) -> Result<DiskInfo, String> {
     let d = disk(n).map_err(|e| e.to_string())?;
     if let Some(why) = &d.protected {
-        return Err(format!("Disk {n} ({}) cannot be tested: {why}.", d.name()));
+        return Err(format!("Disk {n} ({}) is protected: {why}. This operation is not allowed.", d.name()));
     }
     Ok(d)
 }
@@ -505,7 +505,7 @@ pub fn check_path(p: &Path) -> Result<(VolumeInfo, Option<DiskInfo>), String> {
     let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
     for e in &v.extents {
         if let Some(why) = prot.get(&e.0) {
-            return Err(format!("{} is on disk {} which cannot be tested: {why}.", p.display(), e.0));
+            return Err(format!("{} is on disk {} which is protected: {why}. This operation is not allowed.", p.display(), e.0));
         }
     }
     let d = if v.extents.len() == 1 { disk(&v.extents[0].0).ok() } else { None };
@@ -525,7 +525,31 @@ pub struct RawDisk {
 }
 
 impl RawDisk {
+    /// Lock every source volume, then open only for reading. Unlike the write
+    /// path, never force a dismount after a failed lock.
+    pub fn open_backup(d: &DiskInfo) -> io::Result<RawDisk> {
+        let now = check_disk(&d.id).map_err(io::Error::other)?;
+        d.check_identity(&now).map_err(io::Error::other)?;
+        let mut locks = vec![];
+        for v in &now.volumes {
+            let f = open_dev(v.guid.trim_end_matches('\\'), GENERIC_READ | GENERIC_WRITE)?;
+            ioctl(&f, FSCTL_LOCK_VOLUME, &[], &mut []).map_err(|_| io::Error::other("Close programs using the source drive before creating an image."))?;
+            locks.push(f);
+        }
+        let mut raw = Self::open_shared(d, false, 1)?;
+        raw._locks = locks;
+        Ok(raw)
+    }
+
     pub fn open(d: &DiskInfo, write: bool) -> io::Result<RawDisk> {
+        Self::open_shared(d, write, 3)
+    }
+
+    pub fn open_restore(d: &DiskInfo) -> io::Result<RawDisk> {
+        Self::open_shared(d, true, 1)
+    }
+
+    fn open_shared(d: &DiskInfo, write: bool, share: u32) -> io::Result<RawDisk> {
         let mut locks = vec![];
         let current = disk(&d.id)?;
         d.check_identity(&current).map_err(io::Error::other)?;
@@ -533,7 +557,7 @@ impl RawDisk {
             // Re-check right before writing: disk numbers can move when devices come and go.
             let now = check_disk(&d.id).map_err(io::Error::other)?;
             if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial {
-                return Err(io::Error::other(format!("disk {} is no longer the drive that was selected; refusing to write", d.id)));
+                return Err(io::Error::other(format!("disk {} is no longer the drive that was selected; refusing access", d.id)));
             }
             for v in &current.volumes {
                 locks.push(lock_volume(v)?);
@@ -543,7 +567,7 @@ impl RawDisk {
         let f = OpenOptions::new()
             .read(true)
             .write(write)
-            .share_mode(3)
+            .share_mode(share)
             .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH)
             .open(&path)?;
         let mut len = [0u8; 8];
@@ -594,7 +618,9 @@ impl Dev for RawDisk {
         self.wrote = true;
         let mut done = 0;
         while done < buf.len() {
-            done += self.file.seek_write(&buf[done..], off + done as u64)?;
+            let n = self.file.seek_write(&buf[done..], off + done as u64)?;
+            if n == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "disk stopped accepting writes")); }
+            done += n;
         }
         Ok(())
     }

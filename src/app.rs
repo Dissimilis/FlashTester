@@ -20,6 +20,8 @@ pub enum FixSize {
 
 #[derive(Clone)]
 pub enum Job {
+    Backup { w: Where, path: PathBuf },
+    Restore { w: Where, path: PathBuf, folder: Option<PathBuf> },
     Test { w: Where, o: TestOpts },
     Verify { w: Where, h2w: bool, manifest: Option<PathBuf>, loops: u32 },
     Probe { w: Where },
@@ -34,6 +36,16 @@ pub enum Job {
 }
 
 impl Job {
+    pub fn disk(&self) -> Option<&DiskInfo> {
+        match self {
+            Job::Fix { disk, .. } => Some(disk),
+            Job::Backup { w, .. } | Job::Restore { w, .. }
+            | Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w }
+            | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::SmallFiles { w, .. }
+            | Job::PlugPull { w, .. } | Job::Bench { w, .. } => w.disk(),
+        }
+    }
+
     /// Only these whole-disk operations may run on a protected disk.
     /// A file benchmark still creates files, even with `write: false`.
     pub fn reads_disk_only(&self) -> bool {
@@ -52,6 +64,7 @@ impl Job {
             Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w }
             | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::SmallFiles { w, .. }
             | Job::PlugPull { w, .. } | Job::Bench { w, .. } => w,
+            Job::Backup { w, .. } | Job::Restore { w, .. } => w,
         };
         match w {
             Where::Disk(d) => {
@@ -72,6 +85,7 @@ impl Job {
             Job::Test { w, .. } | Job::Probe { w } => matches!(w, Where::Disk(_)),
             Job::Iops { w, write, .. } | Job::Bench { w, write, .. } => *write && matches!(w, Where::Disk(_)),
             Job::Fix { .. } => true,
+            Job::Restore { w, .. } => matches!(w, Where::Disk(_)),
             _ => false,
         }
     }
@@ -80,6 +94,7 @@ impl Job {
             Job::Test { w, .. } | Job::Verify { w, .. } | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::Bench { w, .. } => matches!(w, Where::Disk(_)),
             Job::Probe { .. } | Job::Fix { .. } => true,
             Job::SmallFiles { .. } | Job::PlugPull { .. } => false,
+            Job::Backup { w, .. } | Job::Restore { w, .. } => matches!(w, Where::Disk(_)),
         }
     }
 }
@@ -125,6 +140,8 @@ fn refused(cmd: &str, w: Option<&Where>, msg: String) -> Report {
 
 fn refused_job(job: &Job, msg: String) -> Report {
     let (command, target) = match job {
+        Job::Backup { w, .. } => ("backup", w.target()),
+        Job::Restore { w, .. } => ("restore", w.target()),
         Job::Test { w, .. } => ("test", w.target()),
         Job::Verify { w, .. } => ("verify", w.target()),
         Job::Probe { w } => ("probe", w.target()),
@@ -153,6 +170,8 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
     let _awake = platform::KeepAwake::new();
     let watch = smart_disk(job).filter(|_| platform::is_admin()).and_then(|d| crate::smart::Watch::start(&d, ctx));
     let mut rep = match job {
+        Job::Backup { w, path } => crate::backup::run(w, path, false, None, ctx),
+        Job::Restore { w, path, folder } => crate::backup::run(w, path, true, folder.as_deref(), ctx),
         Job::Test { w, o } => fulltest::run_test(w, o, ctx),
         Job::Verify { w, h2w, manifest, loops } => verify(w, *h2w, manifest.as_deref(), *loops, ctx),
         Job::Probe { w } => run_probe(w, ctx),
@@ -181,7 +200,7 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
 fn smart_disk(job: &Job) -> Option<DiskInfo> {
     let w = match job {
         Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w } | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::SmallFiles { w, .. } | Job::Bench { w, .. } => w,
-        Job::PlugPull { .. } | Job::Fix { .. } => return None,
+        Job::PlugPull { .. } | Job::Fix { .. } | Job::Backup { .. } | Job::Restore { .. } => return None,
     };
     match w {
         Where::Disk(d) => Some(d.clone()),

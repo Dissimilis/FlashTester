@@ -401,7 +401,7 @@ pub fn disk(id: &str) -> io::Result<DiskInfo> {
 pub fn check_disk(id: &str) -> Result<DiskInfo, String> {
     let d = disk(id).map_err(|e| e.to_string())?;
     if let Some(why) = &d.protected {
-        return Err(format!("Disk {} ({}) cannot be tested: {why}.", d.id, d.name()));
+        return Err(format!("Disk {} ({}) is protected: {why}. This operation is not allowed.", d.id, d.name()));
     }
     Ok(d)
 }
@@ -430,7 +430,7 @@ pub fn check_path(p: &Path) -> Result<(VolumeInfo, Option<DiskInfo>), String> {
     let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
     for e in &v.extents {
         if let Some(why) = prot.get(&e.0) {
-            return Err(format!("{} is on disk {} which cannot be tested: {why}.", p.display(), e.0));
+            return Err(format!("{} is on disk {} which is protected: {why}. This operation is not allowed.", p.display(), e.0));
         }
     }
     // Haiku's FAT (and other non-BFS) drivers refuse O_DIRECT: reads would come
@@ -452,6 +452,12 @@ pub struct RawDisk {
 }
 
 impl RawDisk {
+    pub fn open_restore(d: &DiskInfo) -> io::Result<RawDisk> { Self::open(d, true) }
+
+    pub fn open_backup(_d: &DiskInfo) -> io::Result<RawDisk> {
+        Err(other("Whole-disk backup is not available on Haiku: exclusive source access is not implemented. Use a file backup."))
+    }
+
     pub fn open(d: &DiskInfo, write: bool) -> io::Result<RawDisk> {
         if write {
             same_disk(d).map_err(other)?;
@@ -474,7 +480,9 @@ impl Dev for RawDisk {
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
         let mut done = 0;
         while done < buf.len() {
-            done += pwrite(&self.file, &buf[done..], off + done as u64)?;
+            let n = pwrite(&self.file, &buf[done..], off + done as u64)?;
+            if n == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "disk stopped accepting writes")); }
+            done += n;
         }
         Ok(())
     }

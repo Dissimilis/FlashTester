@@ -61,6 +61,28 @@ struct TargetArg {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Back up files to a ZIP archive, or a whole disk to an .img and .img.json.
+    Backup {
+        #[command(flatten)]
+        t: TargetArg,
+        /// New backup file, on another physical disk. Existing files are refused.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Check and restore a FlashTester ZIP backup or whole-disk image.
+    Restore {
+        /// ZIP backup or .img file (keep its .img.json alongside it).
+        backup: PathBuf,
+        /// New folder on a non-system disk for a file backup.
+        #[arg(long, conflicts_with = "disk", required_unless_present = "disk")]
+        to: Option<PathBuf>,
+        /// Destination disk for an image. All existing data will be overwritten.
+        #[arg(long, conflicts_with = "to")]
+        disk: Option<String>,
+        /// Confirm overwriting the destination disk.
+        #[arg(long)]
+        destroy: bool,
+    },
     /// Start the GUI (the default without arguments; on Linux it needs an X11 or XWayland desktop).
     #[cfg(any(windows, target_os = "linux"))]
     Gui {
@@ -500,6 +522,16 @@ fn info(t: &TargetArg, json: bool) -> i32 {
 
 fn emit(rep: &Report, cli: &Cli) -> i32 {
     let mut save_failed = false;
+    // A report path must not overwrite the backup or its checksum manifest.
+    let save = |p: &std::path::Path, body: String| -> std::io::Result<()> {
+        if matches!(rep.command.as_str(), "backup" | "restore") {
+            let mut f = std::fs::File::create_new(p)?;
+            f.write_all(body.as_bytes())?;
+            f.sync_all()
+        } else {
+            std::fs::write(p, body)
+        }
+    };
     if cli.json {
         println!("{}", serde_json::to_string_pretty(rep).unwrap());
     } else {
@@ -508,13 +540,13 @@ fn emit(rep: &Report, cli: &Cli) -> i32 {
     if let Some(p) = &cli.report {
         let is_json = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
         let body = if is_json { serde_json::to_string_pretty(rep).unwrap() } else { rep.html() };
-        match std::fs::write(p, body) {
+        match save(p, body) {
             Ok(()) => eprintln!("Report saved to {}", p.display()),
             Err(e) => { eprintln!("Cannot save report {}: {e}", p.display()); save_failed = true; }
         }
     }
     if let Some(p) = &cli.evidence {
-        match std::fs::write(p, rep.evidence_html()) {
+        match save(p, rep.evidence_html()) {
             Ok(()) => eprintln!("Evidence sheet saved to {}", p.display()),
             Err(e) => { eprintln!("Cannot save evidence {}: {e}", p.display()); save_failed = true; }
         }
@@ -538,6 +570,20 @@ fn need_destroy(destroy: bool, w: &Where) -> Result<(), String> {
 
 fn build_job(cmd: &Cmd) -> Result<Job, String> {
     Ok(match cmd {
+        Cmd::Backup { t, output } => Job::Backup { w: target(t)?, path: output.clone() },
+        Cmd::Restore { backup, to, disk, destroy } => {
+            let (w, folder) = if let Some(id) = disk {
+                let w = app::resolve_disk(id)?;
+                need_destroy(*destroy, &w)?;
+                (w, None)
+            } else {
+                let dst = std::path::absolute(to.as_ref().ok_or("Choose --to or --disk.")?).map_err(|e| e.to_string())?;
+                let parent = dst.parent().ok_or("Restore folder needs an existing parent.")?;
+                let name = dst.file_name().ok_or("Choose a new restore folder.")?;
+                (app::resolve_path(parent.to_str().ok_or("Folder path must be Unicode.")?)?, Some(PathBuf::from(name)))
+            };
+            Job::Restore { w, path: backup.clone(), folder }
+        }
         Cmd::Test { t, o, passes } | Cmd::Endurance { t, o, passes } => {
             let w = target(t)?;
             need_destroy(o.destroy, &w)?;

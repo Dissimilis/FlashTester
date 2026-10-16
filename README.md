@@ -14,6 +14,7 @@ Finds out whether a USB stick, SD card or other disk really stores what it claim
 - **GUI:** pick a drive and a test, watch the block map fill in (the drive as a grid of cells: untested, written, verified, corrupted, aliased, unreadable, with offsets, speed and errors on hover) next to a speed-by-position graph, and read a plain verdict with the next step.
 - **Trust checks:** unplug/replug before verifying, identity changes across replug, placeholder serials, USB 2 link warning, pull-the-plug-mid-write test, retention check later.
 - **Reports:** a plain verdict, a detailed HTML report, JSON, exit codes, and a one-page evidence sheet for refund claims.
+- **Backup and restore:** files in a single ZIP archive, or every sector in a whole-disk image. Backups include SHA-256 checksums; restore checks the input before writing and reads the result back afterward.
 - **Fix:** repartition a fake drive to the capacity that really works.
 
 [![CI](https://github.com/Dissimilis/FlashTester/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/Dissimilis/FlashTester/actions/workflows/release.yml)
@@ -28,6 +29,8 @@ Select any disk to see its identity in the main panel, including firmware, contr
 Protected drives, including the system drive, offer **Drive details**, **Read speed** and **Read scan**. The speed check defaults to 256 MiB; the scan reads the whole disk unless you enter a size limit. Both can be cancelled. They open the disk read-only without locking or dismounting volumes. Other programs can affect the result and may respond more slowly during a check. Reading does not verify usable capacity.
 
 Other drives also offer file-mode tests in free space and whole-disk write tests. The panel explains what each operation touches. Destructive tests are shown in red and require confirmation. Tests that need administrator rights offer to restart FlashTester elevated. While a test runs, the block map and speed graph fill in; the result includes a verdict and report buttons.
+
+For backup and restore, select a volume for ZIP archives or the whole disk for `.img` images. Choose **Create backup** or **Restore backup**, then enter the backup file path. File restore also asks for a new folder on the selected volume.
 
 ![Setting up a full test on a volume](website/screenshot-setup.png)
 
@@ -87,6 +90,29 @@ System disks allow identification, read scans and whole-disk read-speed checks. 
 
 Protection covers disks holding the Windows folder, boot partition or page files; on Linux, disks under `/`, `/boot`, `/boot/efi`, `/usr` or `/var` (through LVM, RAID and device-mapper) or holding swap; on FreeBSD, the same mount points, swap and the crash-dump device (through partitions, labels, geli, gmirror, ZFS pools and file-backed memory disks). If the OS disk cannot be identified, write access fails closed. Network shares and FUSE pools such as mergerfs are refused because they cannot be mapped to one disk. Whole-disk writes erase data and require `--destroy` (or confirmation in the GUI) and administrator or root access. File-mode tests use free space, but a fake drive can redirect those writes onto existing files.
 
+## Backup and restore
+
+File backups use one ZIP archive with a checksum manifest inside it. Ordinary archive tools can extract the `files/` folder. FlashTester restores its own archives into a **new folder**, refusing to overwrite an existing one.
+
+```text
+flashtester backup E:\photos --output C:\Backups\photos.zip
+flashtester restore C:\Backups\photos.zip --to E:\restored-photos
+flashtester backup --disk 3 --output C:\Backups\drive.img
+flashtester restore C:\Backups\drive.img --disk 3 --destroy
+```
+
+Create the backup's parent directory first. Store the backup on a different physical disk from the source or restore destination; a second partition on the same disk is refused. The computer's system disk can hold backup files, but it cannot be the source or restore destination. Live system backups need snapshot support, which this version does not have.
+
+ZIP backups preserve file contents, folder structure, empty folders and file modification times. Close programs using the source: file backups are not snapshots. Links, special files and names that cannot be represented safely across platforms are refused. Permissions, ownership, alternate data streams and other filesystem metadata are not preserved. Windows volume-root backups exclude `$RECYCLE.BIN` and `System Volume Information`, and list those exclusions in the result. Use a disk image when filesystem metadata matters.
+
+Disk images include every byte, including partitions, boot records and unused space, so the backup disk needs at least the source disk's reported capacity in free space. Keep `drive.img` and `drive.img.json` together. Restore requires the same logical sector size and a destination at least as large as the original disk. It copies the original partition layout without expanding it; bytes beyond the image on a larger disk remain unchanged. A larger GPT destination may need its backup partition table relocated with a partitioning tool.
+
+Whole-disk backup and restore need administrator or root access. Windows locks the source volumes during imaging; close programs using them. Linux and FreeBSD require unmounting the volumes first. FreeBSD also requires a writable source device to hold a GEOM write claim that prevents mounts, though the backup does not write data. Whole-disk backup is unavailable on Haiku because exclusive source access is not implemented there; its file backups and restores currently require BFS volumes.
+
+Unreadable data stops the operation. Cancelled or failed output is kept for inspection and is not reported as a successful backup or restore. Restore checks the archive or image before it starts writing, then checks the restored data. File checks can be served from the operating system's cache; they do not replace testing the media or checking it again after reconnecting it. These commands do not recover already-corrupted files or test usable capacity.
+
+Keep backup files unchanged during restore. Disk-image restore rechecks each chunk against the initial validation before writing it. A changed chunk stops the restore, but earlier chunks may already have been written. Completed output is flushed, including directory entries on Unix; this cannot guarantee that a drive or controller survives power loss without losing data.
+
 ## Quick start
 
 ```text
@@ -104,6 +130,10 @@ On Linux use a mount point and a kernel name (`test /media/you/STICK`, `--disk s
 |---|---|---|
 | `list` | Disks and volumes, protection status, USB ID and link speed | no |
 | `info E:` / `info --disk N` | Vendor, product, serial, USB VID:PID, link, volumes, suspicious identity | no |
+| `backup E:\photos --output C:\Backups\photos.zip` | Save files in one ZIP archive with checksums | no |
+| `restore photos.zip --to E:\restored` | Check and restore an archive into a new folder | no |
+| `backup --disk N --output drive.img` | Save the whole disk and a checksum manifest | yes |
+| `restore drive.img --disk N --destroy` | Check, restore and read back a whole-disk image | yes |
 | `flash-id "AD D3 10 A6 34 00"` | Offline NAND part lookup, preserving all matching candidates | no |
 | `flash-layouts` / `decode-flash reply.bin --identity-layout 0x463c20` | List recovered identity layouts / decode a saved binary response | no |
 | `test E:` | Fill free space with seeded data, read it all back. `--size 8G`, `--replug`, `--passes N`, `--cleanup` | no |
@@ -122,6 +152,8 @@ On Linux use a mount point and a kernel name (`test /media/you/STICK`, `--disk s
 | `render result.json --html r.html` | Turn a saved JSON result into an HTML report / `--evidence-out` sheet | no |
 
 Options for every command: `--json` (result on stdout), `--report file.html|file.json`, `--evidence file.html`, `-q` (no progress).
+
+For `backup` and `restore`, report and evidence paths must be new files. This prevents a report from replacing a backup, its manifest or another existing file. Use a different report filename for each run. If saving a report fails, the command returns exit code 3 even when the backup or restore itself completed; the printed result shows both outcomes.
 
 **Exit codes:** 0 OK, 1 problem found (fake, defective, read-only, unreliable), 2 refused (protected operation, missing `--destroy`, not admin), 3 error, 130 cancelled.
 

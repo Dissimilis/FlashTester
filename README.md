@@ -2,7 +2,7 @@
 
 Website: [flashtester.eu](https://flashtester.eu/).
 
-![FlashTester after a 1 GB full test of a generic 64 GB USB drive: verdict OK, block map and speed graph](website/screenshot-result.png)
+![FlashTester after a 1 GB full test of a generic 64 GB USB drive: verdict OK, block map and speed graph](assets/screenshot-result.png)
 
 Finds out whether a USB stick, SD card or other disk really stores what it claims. FlashTester does what [h2testw](https://www.heise.de/download/product/h2testw-50539) does and adds the things h2testw can't:
 
@@ -32,7 +32,7 @@ Other drives also offer file-mode tests in free space and whole-disk write tests
 
 For backup and restore, select a volume for ZIP archives or the whole disk for `.img` images. Choose **Create backup** or **Restore backup**, then enter the backup file path. File restore also asks for a new folder on the selected volume.
 
-![Setting up a full test on a volume](website/screenshot-setup.png)
+![Setting up a full test on a volume](assets/screenshot-setup.png)
 
 ## Download and run
 

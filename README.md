@@ -33,7 +33,9 @@ Other drives also offer file-mode tests in free space and whole-disk write tests
 
 ## Download and run
 
-One self-contained file per platform: no installer, no dependencies. Started without arguments it opens the GUI (where there is one); with arguments it runs on the command line.
+[Download the latest release](https://github.com/Dissimilis/FlashTester/releases/latest). Each release includes SHA-256 checksums.
+
+One executable per platform, with no installer. Windows uses system DLLs; Linux and FreeBSD binaries are statically linked. The experimental Haiku binary uses Haiku system libraries. Started without arguments it opens the GUI (where there is one); with arguments it runs on the command line.
 
 | Platform | File | Interface |
 |---|---|---|
@@ -41,6 +43,7 @@ One self-contained file per platform: no installer, no dependencies. Started wit
 | Linux x86_64, any distribution | `flashtester-linux-x86_64` | GUI (X11 or XWayland) and command line |
 | Linux aarch64 (64-bit ARM: Raspberry Pi with a 64-bit OS, ARM boards, routers) | `flashtester-linux-aarch64` | GUI (X11 or XWayland) and command line |
 | FreeBSD 13.5 to 16.0, amd64 | `flashtester-freebsd-x86_64` | command line |
+| Haiku x86_64, experimental | `flashtester-haiku-x86_64` | command line |
 
 ### Windows
 

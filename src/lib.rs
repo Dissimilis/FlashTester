@@ -16,9 +16,9 @@ pub mod report;
 pub mod scan;
 pub mod smart;
 pub mod trust;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 pub mod gui;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 pub mod gui_kit;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 pub mod gui_map;

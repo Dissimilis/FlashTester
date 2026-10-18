@@ -173,9 +173,9 @@ impl Kind {
     fn help(self, raw: bool) -> &'static str {
         match (self, raw) {
             (Kind::Backup, false) => "Save files and folders in one ZIP archive, then check their checksums. Keeps file contents and modification times. Store the backup on another disk.",
-            (Kind::Backup, true) => "Save every sector in a disk image, including partitions, boot records and unused space. Needs as much space as the whole source disk. Close programs using the drive; on Linux, unmount it first.",
+            (Kind::Backup, true) => "Save every sector in a disk image, including partitions, boot records and unused space. Needs as much space as the whole source disk. Close programs using the drive; on Linux and FreeBSD, unmount it first.",
             (Kind::Restore, false) => "Check a FlashTester ZIP backup, restore it into a new folder on this volume, then check the restored files. Existing folders are refused.",
-            (Kind::Restore, true) => "Check a FlashTester disk image, overwrite this disk with it, then read it back to verify. Keep the .img.json manifest alongside the image. On Linux, unmount the destination first.",
+            (Kind::Restore, true) => "Check a FlashTester disk image, overwrite this disk with it, then read it back to verify. Keep the .img.json manifest alongside the image. On Linux and FreeBSD, unmount the destination first.",
             (Kind::Info, _) => "Read the device identity reported by the operating system.",
             (Kind::Test, false) => "Write test data into free space, then read it back and check for errors. Stops early if later writes overwrite earlier data. A fake drive can also overwrite your files.",
             (Kind::Test, true) => "Write test data across the whole disk, then read it back and check for errors. Erases all files and partitions.",
@@ -204,6 +204,9 @@ impl Kind {
             &[Kind::Info, Kind::Bench, Kind::Scan]
         } else if raw {
             &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
+        } else if cfg!(target_os = "freebsd") {
+            // No free-space probe on FreeBSD: it cannot map a file to disk blocks.
+            &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Test, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
         } else {
             &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Test, Kind::Probe, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
         }
@@ -297,7 +300,7 @@ pub struct Gui {
     styled: bool,
     /// Height of the guards + Start block in the last frame.
     foot_h: f32,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     elevating: Option<std::process::Child>,
 }
 
@@ -332,7 +335,7 @@ impl Gui {
             admin: platform::is_admin(),
             styled: false,
             foot_h: 36.0,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             elevating: None,
         };
         g.refresh();
@@ -1967,7 +1970,7 @@ impl Gui {
     /// pkexec refuses to serve a dead parent, so this process hides its window and
     /// waits: it exits when the root copy closes normally, and comes back otherwise
     /// (password dialog cancelled, root copy failed).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn relaunch(&mut self, ctx: &egui::Context) {
         match platform::relaunch_root() {
             Ok(c) => {
@@ -1978,7 +1981,7 @@ impl Gui {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn poll_relaunch(&mut self, ctx: &egui::Context) {
         let Some(c) = &mut self.elevating else { return };
         let msg = match c.try_wait() {
@@ -2002,7 +2005,7 @@ impl Gui {
             ui.ctx().request_repaint();
             return;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         self.poll_relaunch(ui.ctx());
         self.poll();
         if self.running.is_some() {
@@ -2049,7 +2052,7 @@ Use the command line instead: flashtester --help"
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn run() -> i32 {
     let mut gui = Gui::new();
     match platform::x11gui::run("FlashTester", [1100.0, 760.0], [960.0, 640.0], |ui| gui.show(ui)) {

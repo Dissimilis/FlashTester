@@ -1,4 +1,4 @@
-//! Linux GUI host: an X11 window drawn by a small CPU rasterizer, so the GUI fits in
+//! X11 GUI host (Linux and FreeBSD): an X11 window drawn by a small CPU rasterizer, so the GUI fits in
 //! the static musl binary (winit and glutin would dlopen libX11, libxkbcommon and
 //! libGL, which a static binary cannot). x11rb speaks the X protocol in pure Rust;
 //! Wayland desktops run the window through XWayland.

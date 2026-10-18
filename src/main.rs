@@ -10,8 +10,8 @@ fn main() {
         }
         hook(info)
     }));
-    // No arguments: GUI (on Linux only inside an X11 or XWayland desktop). Any arguments: CLI.
-    #[cfg(any(windows, target_os = "linux"))]
+    // No arguments: GUI (on Linux and FreeBSD only inside an X11 or XWayland desktop). Any arguments: CLI.
+    #[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
     if std::env::args_os().len() <= 1 && (cfg!(windows) || std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())) {
         std::process::exit(flashtester::gui::run());
     }

@@ -41,10 +41,10 @@ Exit codes: 0 OK, 1 problem found (fake/defective/read-only/unreliable), 2 refus
         )
     };
 }
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 const AFTER: &str = after!("
 Run without arguments, or with `gui`, for the GUI.");
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
 const AFTER: &str = after!("");
 
 /// What `fix` formats with unless told otherwise.
@@ -83,8 +83,8 @@ enum Cmd {
         #[arg(long)]
         destroy: bool,
     },
-    /// Start the GUI (the default without arguments; on Linux it needs an X11 or XWayland desktop).
-    #[cfg(any(windows, target_os = "linux"))]
+    /// Start the GUI (the default without arguments; on Linux and FreeBSD it needs an X11 or XWayland desktop).
+    #[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
     Gui {
         /// X display and cookie file for the root copy the GUI starts through pkexec,
         /// which clears the environment.
@@ -632,7 +632,7 @@ fn build_job(cmd: &Cmd) -> Result<Job, String> {
 pub fn main() -> i32 {
     let cli = Cli::parse();
     match &cli.cmd {
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
         Cmd::Gui { display, xauthority } => {
             // SAFETY: no other threads exist yet.
             unsafe {

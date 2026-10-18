@@ -1,4 +1,4 @@
-//! FreeBSD (command line only): disks, partitions and labels from GEOM's own
+//! FreeBSD: disks, partitions and labels from GEOM's own
 //! map (kern.geom.confxml); the system-disk guard; raw disk access; identity from
 //! CAM and usbconfig; repartitioning with gpart and newfs. FreeBSD has no FIEMAP,
 //! so there is no free-space probe.

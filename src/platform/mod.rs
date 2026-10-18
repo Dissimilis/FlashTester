@@ -11,6 +11,10 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use std::path::PathBuf;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use std::process::Command;
 
 #[cfg(windows)]
 mod windows;
@@ -21,7 +25,7 @@ pub use windows::*;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub mod x11gui;
 
 #[cfg(target_os = "freebsd")]
@@ -425,6 +429,62 @@ fn run(cmd: &str, args: &[&str], input: Option<&str>) -> Result<String, String> 
         return Err(format!("{cmd} failed:\n{text}"));
     }
     Ok(text)
+}
+
+/// The desktop user behind a root GUI started through pkexec or sudo: uid, gid, home.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn invoking_user() -> Option<(u32, u32, PathBuf)> {
+    let uid = std::env::var("PKEXEC_UID").or_else(|_| std::env::var("SUDO_UID")).ok()?;
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).find(|f| f.len() >= 6 && f[2] == uid).and_then(|f| Some((f[2].parse().ok()?, f[3].parse().ok()?, PathBuf::from(f[5]))))
+}
+
+/// Where the GUI saves reports: ~/Documents/FlashTester (or ~/FlashTester), in the
+/// desktop user's home even when the GUI runs as root.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn reports_dir() -> PathBuf {
+    let home = invoking_user().map(|u| u.2).or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default();
+    let docs = home.join("Documents");
+    if docs.is_dir() { docs } else { home }.join("FlashTester")
+}
+
+/// A root GUI's report files belong to the desktop user who asked for them.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn give_to_user(p: &Path) {
+    if let Some((uid, gid, _)) = invoking_user() {
+        let _ = std::os::unix::fs::chown(p, Some(uid), Some(gid));
+    }
+}
+
+/// Open with the desktop's default app; not as root (browsers refuse or misbehave),
+/// the GUI lists the saved files anyway.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn open_file(p: &Path) -> io::Result<()> {
+    std::fs::metadata(p)?;
+    if is_admin() {
+        return Err(io::Error::other("Cannot open desktop apps as root. Open the saved path from your desktop session."));
+    }
+    Command::new("xdg-open").arg(std::path::absolute(p)?).spawn().map(|_| ())
+}
+
+/// Start this exe's GUI as root through pkexec (polkit asks for the password). The
+/// root copy connects to the caller's X display with the caller's X cookie; pkexec
+/// clears the environment, so both go in as arguments. The caller must stay alive
+/// until pkexec exits: pkexec refuses to serve a dead parent.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn relaunch_root() -> Result<std::process::Child, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let display = std::env::var("DISPLAY").map_err(|_| "DISPLAY is not set.".to_string())?;
+    let mut c = Command::new("pkexec");
+    c.arg(&exe).args(["gui", "--display", &display]);
+    let xauth = std::env::var_os("XAUTHORITY").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".Xauthority")));
+    if let Some(x) = xauth.filter(|x| x.is_file()) {
+        c.arg("--xauthority").arg(x);
+    }
+    c.spawn().map_err(|e| {
+        let hint = format!("Start FlashTester as root instead: sudo {} (or doas {})", exe.display(), exe.display());
+        if e.kind() == io::ErrorKind::NotFound { format!("pkexec is not installed. {hint}") } else { format!("Cannot run pkexec ({e}). {hint}") }
+    })
 }
 
 #[cfg(test)]

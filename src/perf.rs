@@ -59,9 +59,7 @@ fn run_one(open: &(dyn Fn(bool) -> io::Result<File> + Sync), span: u64, write: b
                     let mut x = new_tag();
                     let mut lat = vec![];
                     while Instant::now() < deadline && !ctx.cancelled() {
-                        x ^= x << 13;
-                        x ^= x >> 7;
-                        x ^= x << 17;
+                        x = crate::pattern::xorshift(x);
                         let off = (x % blocks) * IO as u64;
                         let t = Instant::now();
                         if write {

@@ -3,8 +3,8 @@
 //! from SCSI INQUIRY and the USB device list. Haiku has no file-block map (no
 //! free-space probe) and no command-line partitioner (no `fix`).
 
-use super::{DiskInfo, UsbInfo, VolumeInfo, sniff_fs, statvfs};
-use crate::dev::{ALIGN, Dev, direct, pread, pwrite};
+use super::{check_disk, DiskInfo, UsbInfo, VolumeInfo, sniff_fs};
+use crate::dev::{ALIGN, Dev, direct, pread_full, pwrite_all};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -380,11 +380,8 @@ pub fn list_disks() -> Vec<DiskInfo> {
     disk_ids(Path::new("/dev/disk"), 0, &mut ids);
     ids.sort();
     let mut disks: Vec<DiskInfo> = ids.iter().filter_map(|id| disk_info(id, &ms)).collect();
+    super::mark_protected(&mut disks, &prot);
     for d in &mut disks {
-        d.protected = match &prot {
-            Ok(m) => m.get(&d.id).cloned(),
-            Err(e) => Some(format!("cannot identify the system disk ({e}); refusing all disks")),
-        };
         if d.protected.is_none() && d.bus == "File-backed virtual" {
             d.protected = Some("file-backed disk image, whose backing file cannot be checked".into());
         }
@@ -393,17 +390,7 @@ pub fn list_disks() -> Vec<DiskInfo> {
 }
 
 pub fn disk(id: &str) -> io::Result<DiskInfo> {
-    let n = id.trim().trim_start_matches("/dev/disk/").trim_end_matches("/raw");
-    list_disks().into_iter().find(|d| d.id == n).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("disk {id} not found")))
-}
-
-/// A disk that may be tested, or a refusal message.
-pub fn check_disk(id: &str) -> Result<DiskInfo, String> {
-    let d = disk(id).map_err(|e| e.to_string())?;
-    if let Some(why) = &d.protected {
-        return Err(format!("Disk {} ({}) is protected: {why}. This operation is not allowed.", d.id, d.name()));
-    }
-    Ok(d)
+    super::find_disk(id, id.trim().trim_start_matches("/dev/disk/").trim_end_matches("/raw"))
 }
 
 /// The volume (partition) holding `path`.
@@ -427,12 +414,7 @@ pub fn volume_of_path(path: &Path) -> io::Result<VolumeInfo> {
 /// The volume and disk behind a target folder, or a refusal message.
 pub fn check_path(p: &Path) -> Result<(VolumeInfo, Option<DiskInfo>), String> {
     let v = volume_of_path(p).map_err(|e| format!("{}: cannot map to a disk ({e}); refusing", p.display()))?;
-    let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
-    for e in &v.extents {
-        if let Some(why) = prot.get(&e.0) {
-            return Err(format!("{} is on disk {} which is protected: {why}. This operation is not allowed.", p.display(), e.0));
-        }
-    }
+    super::refuse_protected(p, &v)?;
     // Haiku's FAT (and other non-BFS) drivers refuse O_DIRECT: reads would come
     // from the file cache, not the drive.
     if v.fs != "bfs" {
@@ -478,25 +460,11 @@ impl Dev for RawDisk {
         self.size
     }
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
-        let mut done = 0;
-        while done < buf.len() {
-            let n = pwrite(&self.file, &buf[done..], off + done as u64)?;
-            if n == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "disk stopped accepting writes")); }
-            done += n;
-        }
-        Ok(())
+        pwrite_all(&self.file, buf, off)
     }
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
         let n = (buf.len() as u64).min(self.size.saturating_sub(off)) as usize;
-        let mut done = 0;
-        while done < n {
-            let r = pread(&self.file, &mut buf[done..n], off + done as u64)?;
-            if r == 0 {
-                break;
-            }
-            done += r;
-        }
-        Ok(done)
+        pread_full(&self.file, &mut buf[..n], off)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.file.sync_all()
@@ -504,14 +472,6 @@ impl Dev for RawDisk {
     fn align(&self) -> usize {
         (self.sector as usize).max(ALIGN)
     }
-}
-
-pub fn free_space(path: &Path) -> io::Result<u64> {
-    statvfs(&path.to_string_lossy()).map(|s| s.1).ok_or_else(io::Error::last_os_error)
-}
-
-pub fn alloc_unit(root: &Path) -> io::Result<u64> {
-    statvfs(&root.to_string_lossy()).map(|s| s.2).ok_or_else(io::Error::last_os_error)
 }
 
 const NO_FREE_SPACE_PROBE: &str = "the free-space probe is not available on Haiku (it cannot tell where a file's blocks are on the disk); use the raw probe on an empty disk, or a full test";
@@ -530,35 +490,11 @@ pub fn repartition(_disk: &DiskInfo, _size_mib: Option<u64>, _fs: &str, _label: 
     Err(NO_FIX.into())
 }
 
-/// No-op on Haiku.
-pub struct KeepAwake;
-
-impl KeepAwake {
-    pub fn new() -> KeepAwake {
-        KeepAwake
-    }
-}
-
-impl Default for KeepAwake {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Identity of the file system an open file lives on.
-pub fn fs_id(f: &File) -> io::Result<u64> {
-    Ok(f.metadata()?.dev())
-}
-
-/// Identity of the file system holding `p`.
-pub fn fs_id_path(p: &Path) -> io::Result<u64> {
-    Ok(std::fs::metadata(p)?.dev())
-}
-
 /// Still the same device (path, size, serial), not protected, and nothing on it mounted.
 fn same_disk(d: &DiskInfo) -> Result<(), String> {
     let now = check_disk(&d.id)?;
-    if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial || now.product != d.product {
+    d.check_identity(&now)?;
+    if now.product != d.product {
         return Err(format!("disk {} is no longer the drive that was selected; aborting", d.id));
     }
     let mounted: Vec<String> = mounts().into_iter().filter(|m| disk_of_device(&m.device).is_ok_and(|x| x == d.id)).map(|m| format!("{} on {}", m.device, if m.point.is_empty() { &m.label } else { &m.point })).collect();

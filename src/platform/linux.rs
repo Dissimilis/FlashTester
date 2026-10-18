@@ -2,8 +2,8 @@
 //! guard; raw disk access (O_DIRECT, O_EXCL); free-space mapping (fallocate +
 //! FIEMAP); repartitioning with sfdisk and mkfs.
 
-use super::{CardInfo, DiskInfo, UsbInfo, VolumeInfo, run, sniff_fs, statvfs};
-use crate::dev::{ALIGN, Dev, direct, pread, pwrite};
+use super::{check_disk, CardInfo, DiskInfo, UsbInfo, VolumeInfo, run, sniff_fs, statvfs};
+use crate::dev::{ALIGN, Dev, direct, pread_full, pwrite_all};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -14,6 +14,10 @@ use std::process::Command;
 
 const BLKRRPART: libc::c_ulong = 0x125F;
 const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
+const LOOP_GET_STATUS64: libc::c_ulong = 0x4C05;
+const BLKGETSIZE64: libc::c_ulong = 0x8008_1272;
+const SG_IO: libc::c_ulong = 0x2285;
+const NVME_IOCTL_ADMIN_CMD: libc::c_ulong = 0xC048_4E41;
 
 fn read(p: impl AsRef<Path>) -> String {
     std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default()
@@ -129,7 +133,7 @@ fn majmin_of_dev(dev: &str) -> Option<(u64, u64)> {
 fn loop_backing(name: &str) -> io::Result<(u64, u64)> {
     let f = File::open(format!("/dev/{name}"))?;
     let mut info = [0u64; 29]; // struct loop_info64: lo_device, lo_inode, lo_rdevice, ...
-    if unsafe { libc::ioctl(f.as_raw_fd(), 0x4C05u32 as _, info.as_mut_ptr()) } != 0 {
+    if unsafe { libc::ioctl(f.as_raw_fd(), LOOP_GET_STATUS64 as _, info.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
     let d = if info[2] != 0 { info[2] } else { info[0] };
@@ -578,27 +582,12 @@ pub fn list_disks() -> Vec<DiskInfo> {
     let mut names: Vec<String> = std::fs::read_dir("/sys/block").map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| !skip_disk(n)).collect()).unwrap_or_default();
     names.sort();
     let mut disks: Vec<DiskInfo> = names.iter().filter_map(|n| disk_info(n, &ms)).collect();
-    for d in &mut disks {
-        d.protected = match &prot {
-            Ok(m) => m.get(&d.id).cloned(),
-            Err(e) => Some(format!("cannot identify the system disk ({e}); refusing all disks")),
-        };
-    }
+    super::mark_protected(&mut disks, &prot);
     disks
 }
 
 pub fn disk(id: &str) -> io::Result<DiskInfo> {
-    let n = id.trim().trim_start_matches("/dev/");
-    list_disks().into_iter().find(|d| d.id == n).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("disk {id} not found")))
-}
-
-/// A disk that may be tested, or a refusal message.
-pub fn check_disk(id: &str) -> Result<DiskInfo, String> {
-    let d = disk(id).map_err(|e| e.to_string())?;
-    if let Some(why) = &d.protected {
-        return Err(format!("Disk {} ({}) is protected: {why}. This operation is not allowed.", d.id, d.name()));
-    }
-    Ok(d)
+    super::find_disk(id, id.trim().trim_start_matches("/dev/"))
 }
 
 /// The volume (partition) holding `path`.
@@ -635,12 +624,7 @@ pub fn volume_of_path(path: &Path) -> io::Result<VolumeInfo> {
 /// The volume and disk behind a target folder, or a refusal message.
 pub fn check_path(p: &Path) -> Result<(VolumeInfo, Option<DiskInfo>), String> {
     let v = volume_of_path(p).map_err(|e| format!("{}: cannot map to a disk ({e}); refusing", p.display()))?;
-    let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
-    for e in &v.extents {
-        if let Some(why) = prot.get(&e.0) {
-            return Err(format!("{} is on disk {} which is protected: {why}. This operation is not allowed.", p.display(), e.0));
-        }
-    }
+    super::refuse_protected(p, &v)?;
     let d = v.extents.first().and_then(|e| disk(&e.0).ok());
     Ok((v, d))
 }
@@ -673,9 +657,7 @@ impl RawDisk {
         if exclusive {
             // Re-check right before writing: device names can move when devices come and go.
             let now = check_disk(&d.id).map_err(io::Error::other)?;
-            if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial {
-                return Err(io::Error::other(format!("disk {} is no longer the drive that was selected; refusing access", d.id)));
-            }
+            d.check_identity(&now).map_err(io::Error::other)?;
             let mounted: Vec<String> = now.volumes.iter().flat_map(|v| v.mount_points.iter().map(move |m| format!("{} on {m}", v.guid))).collect();
             if !mounted.is_empty() {
                 return Err(io::Error::other(format!("disk {} has mounted file systems ({}); unmount them first", d.id, mounted.join(", "))));
@@ -690,8 +672,7 @@ impl RawDisk {
         }
         let f = o.open(&d.path).map_err(|e| if e.raw_os_error() == Some(libc::EBUSY) { io::Error::other(format!("{} is in use (mounted, swap, RAID or held by another program)", d.path)) } else { e })?;
         let mut size = 0u64;
-        // BLKGETSIZE64
-        if unsafe { libc::ioctl(f.as_raw_fd(), 0x8008_1272u32 as _, &mut size) } != 0 {
+        if unsafe { libc::ioctl(f.as_raw_fd(), BLKGETSIZE64 as _, &mut size) } != 0 {
             size = d.size;
         }
         Ok(RawDisk { file: f, size, sector: d.sector_size.max(512), id: d.id.clone(), writable: write, wrote: false })
@@ -715,25 +696,11 @@ impl Dev for RawDisk {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
         }
         self.wrote = true;
-        let mut done = 0;
-        while done < buf.len() {
-            let n = pwrite(&self.file, &buf[done..], off + done as u64)?;
-            if n == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "disk stopped accepting writes")); }
-            done += n;
-        }
-        Ok(())
+        pwrite_all(&self.file, buf, off)
     }
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
         let n = (buf.len() as u64).min(self.size.saturating_sub(off)) as usize;
-        let mut done = 0;
-        while done < n {
-            let r = pread(&self.file, &mut buf[done..n], off + done as u64)?;
-            if r == 0 {
-                break;
-            }
-            done += r;
-        }
-        Ok(done)
+        pread_full(&self.file, &mut buf[..n], off)
     }
     fn flush(&mut self) -> io::Result<()> {
         if self.writable { self.file.sync_all() } else { Ok(()) }
@@ -741,14 +708,6 @@ impl Dev for RawDisk {
     fn align(&self) -> usize {
         (self.sector as usize).max(ALIGN)
     }
-}
-
-pub fn free_space(path: &Path) -> io::Result<u64> {
-    statvfs(&path.to_string_lossy()).map(|s| s.1).ok_or_else(io::Error::last_os_error)
-}
-
-pub fn alloc_unit(root: &Path) -> io::Result<u64> {
-    statvfs(&root.to_string_lossy()).map(|s| s.2).ok_or_else(io::Error::last_os_error)
 }
 
 pub fn free_space_prepare() -> io::Result<()> {
@@ -823,7 +782,7 @@ pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str
     if now.volumes.iter().any(|v| !v.mount_points.is_empty()) {
         return Err(format!("disk {} has mounted file systems; unmount them first", disk.id));
     }
-    let gpt = disk.size > (2u64 << 40);
+    let gpt = disk.size > super::MBR_LIMIT;
     let ty = match (fs, gpt) {
         ("ext4", false) => "83",
         ("fat32", false) => "c",
@@ -904,37 +863,10 @@ fn ensure_node(part: &str) {
     }
 }
 
-/// No-op on Linux: servers don't suspend, and inhibiting needs a session bus.
-pub struct KeepAwake;
-
-impl KeepAwake {
-    pub fn new() -> KeepAwake {
-        KeepAwake
-    }
-}
-
-impl Default for KeepAwake {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Identity of the file system an open file lives on.
-pub fn fs_id(f: &File) -> io::Result<u64> {
-    Ok(f.metadata()?.dev())
-}
-
-/// Identity of the file system holding `p`.
-pub fn fs_id_path(p: &Path) -> io::Result<u64> {
-    Ok(std::fs::metadata(p)?.dev())
-}
-
 /// Still the same device (sysfs path, size, serial) and not protected.
 fn same_disk(d: &DiskInfo) -> Result<(), String> {
     let now = check_disk(&d.id)?;
-    if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial {
-        return Err(format!("disk {} is no longer the drive that was selected; aborting", d.id));
-    }
+    d.check_identity(&now)?;
     in_use_check(&d.id).map_err(|e| e.to_string())
 }
 
@@ -1016,7 +948,7 @@ pub fn scsi(d: &DiskInfo, cdb: &[u8], dir: super::Dir) -> io::Result<Vec<u8>> {
         info: 0,
     };
     let f = smart_open(d)?;
-    if unsafe { libc::ioctl(f.as_raw_fd(), 0x2285u32 as _, &mut h) } != 0 {
+    if unsafe { libc::ioctl(f.as_raw_fd(), SG_IO as _, &mut h) } != 0 {
         return Err(io::Error::last_os_error());
     }
     if h.status != 0 || h.host_status != 0 || h.driver_status & 0xF != 0 {
@@ -1047,7 +979,7 @@ pub fn nvme(d: &DiskInfo, op: u8, nsid: u32, cdw10: u32, len: usize) -> io::Resu
     c[40..44].copy_from_slice(&cdw10.to_le_bytes());
     c[64..68].copy_from_slice(&10_000u32.to_le_bytes());
     let f = smart_open(d)?;
-    let r = unsafe { libc::ioctl(f.as_raw_fd(), 0xC048_4E41u32 as _, c.as_mut_ptr()) };
+    let r = unsafe { libc::ioctl(f.as_raw_fd(), NVME_IOCTL_ADMIN_CMD as _, c.as_mut_ptr()) };
     if r < 0 {
         return Err(io::Error::last_os_error());
     }

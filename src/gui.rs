@@ -316,7 +316,7 @@ impl Gui {
             passes: 0,
             replug: false,
             count: 5000,
-            fs: "exfat".into(),
+            fs: crate::fix::FILESYSTEMS[0].into(),
             confirm: false,
             running: None,
             live: Live::default(),
@@ -562,16 +562,7 @@ impl Gui {
         let (name, body) = if evidence { (format!("evidence-{stamp}.html"), rep.evidence_html()) } else { (format!("report-{}-{stamp}.html", rep.command), rep.html()) };
         let p = dir.join(name);
         let json = dir.join(format!("report-{}-{stamp}.json", rep.command));
-        let saved = (|| -> std::io::Result<()> {
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(&json, serde_json::to_string_pretty(rep)?)?;
-            std::fs::write(&p, body)?;
-            platform::give_to_user(&dir);
-            platform::give_to_user(&json);
-            platform::give_to_user(&p);
-            Ok(())
-        })();
-        match saved {
+        match write_report(rep, &json, &p, &body) {
             Ok(()) => {
                 self.open_saved(&p);
                 self.saved.retain(|old| old != &p && old != &json);
@@ -1090,16 +1081,7 @@ impl Gui {
                 let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
                 let html = dir.join(format!("drive-info-{stamp}.html"));
                 let json = html.with_extension("json");
-                let saved = (|| -> std::io::Result<()> {
-                    std::fs::create_dir_all(&dir)?;
-                    std::fs::write(&json, serde_json::to_string_pretty(&rep)?)?;
-                    std::fs::write(&html, rep.html())?;
-                    platform::give_to_user(&dir);
-                    platform::give_to_user(&json);
-                    platform::give_to_user(&html);
-                    Ok(())
-                })();
-                match saved {
+                match write_report(&rep, &json, &html, &rep.html()) {
                     Ok(()) => { self.error = None; self.saved = vec![html, json]; }
                     Err(e) => self.error = Some(format!("Cannot save report: {e}")),
                 }
@@ -1255,7 +1237,7 @@ impl Gui {
                     ui.label(k::text("File system", 12.0, k::TEXT2));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 16.0;
-                        for f in if cfg!(windows) { &["exfat", "fat32", "ntfs"][..] } else { &["exfat", "fat32", "ntfs", "ext4"] } {
+                        for f in crate::fix::FILESYSTEMS {
                             if k::radio_choice(ui, self.fs == *f, f).clicked() {
                                 self.fs = f.to_string();
                             }
@@ -1801,7 +1783,19 @@ fn info_card(ui: &mut egui::Ui, fill: Color32, stroke: Color32, head: &str, head
     });
 }
 
-/// "E:" for "E:\", the mount point elsewhere.
+/// Writes `rep` as JSON and `body` as HTML, creating their folder, and hands
+/// all three to the desktop user (the GUI may run elevated).
+fn write_report(rep: &Report, json: &std::path::Path, html: &std::path::Path, body: &str) -> std::io::Result<()> {
+    let dir = html.parent().unwrap_or(html);
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(json, serde_json::to_string_pretty(rep)?)?;
+    std::fs::write(html, body)?;
+    platform::give_to_user(dir);
+    platform::give_to_user(json);
+    platform::give_to_user(html);
+    Ok(())
+}
+
 /// The SMART view's content: alarms, the important counters, then every counter.
 fn smart_body(ui: &mut egui::Ui, s: &Smart, raw_open: &mut bool) {
     ui.add(Label::new(k::text("Values as the drive's firmware reports them. FlashTester cannot check them, and the firmware of a fake drive can lie.", 13.0, k::TEXT2)).wrap());
@@ -1874,6 +1868,7 @@ fn smart_body(ui: &mut egui::Ui, s: &Smart, raw_open: &mut bool) {
     });
 }
 
+/// "E:" for "E:\", the mount point elsewhere.
 fn vol_key(m: &str) -> String {
     let t = m.trim_end_matches(['\\', '/']);
     if t.is_empty() { m.to_string() } else { t.to_string() }
@@ -2048,8 +2043,7 @@ pub fn run() -> i32 {
 Use the command line instead: flashtester --help"
             );
             eprintln!("{msg}");
-            let (t, m): (Vec<u16>, Vec<u16>) = ("FlashTester".encode_utf16().chain(Some(0)).collect(), msg.encode_utf16().chain(Some(0)).collect());
-            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), 0x10) };
+            platform::error_box("FlashTester", &msg);
             3
         }
     }

@@ -3,12 +3,11 @@
 //! CAM and usbconfig; repartitioning with gpart and newfs. FreeBSD has no FIEMAP,
 //! so there is no free-space probe.
 
-use super::{DiskInfo, UsbInfo, VolumeInfo, run, sniff_fs, statvfs};
-use crate::dev::{ALIGN, Dev, direct, pread, pwrite};
+use super::{check_disk, DiskInfo, UsbInfo, VolumeInfo, run, sniff_fs, statvfs};
+use crate::dev::{ALIGN, Dev, direct, pread_full, pwrite_all};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::process::Command;
@@ -585,12 +584,7 @@ fn list(mesh: &Mesh) -> Vec<DiskInfo> {
     let mut ids: Vec<(&str, &str)> = mesh.provs.iter().filter(|(id, p)| mesh.class(id) == "DISK" && p.size > 0 && !p.name.starts_with("cd")).map(|(id, p)| (p.name.as_str(), id.as_str())).collect();
     ids.sort();
     let mut disks: Vec<DiskInfo> = ids.iter().map(|(_, id)| disk_info(mesh, id, &cams, &ms, &chains)).collect();
-    for d in &mut disks {
-        d.protected = match &prot {
-            Ok(m) => m.get(&d.id).cloned(),
-            Err(e) => Some(format!("cannot identify the system disk ({e}); refusing all disks")),
-        };
-    }
+    super::mark_protected(&mut disks, &prot);
     disks
 }
 
@@ -602,17 +596,7 @@ pub fn list_disks() -> Vec<DiskInfo> {
 }
 
 pub fn disk(id: &str) -> io::Result<DiskInfo> {
-    let n = id.trim().trim_start_matches("/dev/");
-    list_disks().into_iter().find(|d| d.id == n).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("disk {id} not found")))
-}
-
-/// A disk that may be tested, or a refusal message.
-pub fn check_disk(id: &str) -> Result<DiskInfo, String> {
-    let d = disk(id).map_err(|e| e.to_string())?;
-    if let Some(why) = &d.protected {
-        return Err(format!("Disk {} ({}) is protected: {why}. This operation is not allowed.", d.id, d.name()));
-    }
-    Ok(d)
+    super::find_disk(id, id.trim().trim_start_matches("/dev/"))
 }
 
 /// The volume (partition) holding `path`.
@@ -660,12 +644,7 @@ pub fn volume_of_path(path: &Path) -> io::Result<VolumeInfo> {
 /// The volume and disk behind a target folder, or a refusal message.
 pub fn check_path(p: &Path) -> Result<(VolumeInfo, Option<DiskInfo>), String> {
     let v = volume_of_path(p).map_err(|e| format!("{}: cannot map to a disk ({e}); refusing", p.display()))?;
-    let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
-    for e in &v.extents {
-        if let Some(why) = prot.get(&e.0) {
-            return Err(format!("{} is on disk {} which is protected: {why}. This operation is not allowed.", p.display(), e.0));
-        }
-    }
+    super::refuse_protected(p, &v)?;
     let d = v.extents.first().and_then(|e| disk(&e.0).ok());
     Ok((v, d))
 }
@@ -726,25 +705,11 @@ impl Dev for RawDisk {
         if !self.writable {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
         }
-        let mut done = 0;
-        while done < buf.len() {
-            let n = pwrite(&self.file, &buf[done..], off + done as u64)?;
-            if n == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "disk stopped accepting writes")); }
-            done += n;
-        }
-        Ok(())
+        pwrite_all(&self.file, buf, off)
     }
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
         let n = (buf.len() as u64).min(self.size.saturating_sub(off)) as usize;
-        let mut done = 0;
-        while done < n {
-            let r = pread(&self.file, &mut buf[done..n], off + done as u64)?;
-            if r == 0 {
-                break;
-            }
-            done += r;
-        }
-        Ok(done)
+        pread_full(&self.file, &mut buf[..n], off)
     }
     fn flush(&mut self) -> io::Result<()> {
         if self.writable { self.file.sync_all() } else { Ok(()) }
@@ -752,14 +717,6 @@ impl Dev for RawDisk {
     fn align(&self) -> usize {
         (self.sector as usize).max(ALIGN)
     }
-}
-
-pub fn free_space(path: &Path) -> io::Result<u64> {
-    statvfs(&path.to_string_lossy()).map(|s| s.1).ok_or_else(io::Error::last_os_error)
-}
-
-pub fn alloc_unit(root: &Path) -> io::Result<u64> {
-    statvfs(&root.to_string_lossy()).map(|s| s.2).ok_or_else(io::Error::last_os_error)
 }
 
 const NO_FREE_SPACE_PROBE: &str = "the free-space probe is not available on FreeBSD (it cannot tell where a file's blocks are on the disk); use the raw probe on an empty disk, or a full test";
@@ -779,7 +736,7 @@ pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str
     if now.volumes.iter().any(|v| !v.mount_points.is_empty()) {
         return Err(format!("disk {} has mounted file systems; unmount them first", disk.id));
     }
-    let gpt = fs == "ufs" || disk.size > (2u64 << 40);
+    let gpt = fs == "ufs" || disk.size > super::MBR_LIMIT;
     let ty = match (fs, gpt) {
         ("ufs", _) => "freebsd-ufs",
         (_, false) => "fat32lba",
@@ -822,38 +779,11 @@ pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str
     Ok(log)
 }
 
-/// No-op on FreeBSD: servers don't suspend.
-pub struct KeepAwake;
-
-impl KeepAwake {
-    pub fn new() -> KeepAwake {
-        KeepAwake
-    }
-}
-
-impl Default for KeepAwake {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Identity of the file system an open file lives on.
-pub fn fs_id(f: &File) -> io::Result<u64> {
-    Ok(f.metadata()?.dev())
-}
-
-/// Identity of the file system holding `p`.
-pub fn fs_id_path(p: &Path) -> io::Result<u64> {
-    Ok(std::fs::metadata(p)?.dev())
-}
-
 /// Still the same device (location, size, serial), not protected, and nothing
 /// on it is open for writing (mounted, swap, ZFS, another GEOM layer).
 fn same_disk(d: &DiskInfo) -> Result<(), String> {
     let now = check_disk(&d.id)?;
-    if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial {
-        return Err(format!("disk {} is no longer the drive that was selected; aborting", d.id));
-    }
+    d.check_identity(&now)?;
     let mesh = Mesh::load().map_err(|e| e.to_string())?;
     let id = mesh.id(&d.id).ok_or_else(|| format!("disk {} is gone", d.id))?;
     let mut held = vec![];

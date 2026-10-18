@@ -74,14 +74,21 @@ fn words(p: Pattern, off: u64, w: &mut [u64; WORDS]) {
     }
 }
 
+/// One xorshift64 step.
+#[inline]
+pub fn xorshift(mut x: u64) -> u64 {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
 fn seeded_words(tag: u64, off: u64, w: &mut [u64; WORDS]) {
     w[0] = off;
     w[1] = tag;
     let mut x = splitmix(tag ^ splitmix(off)) | 1;
     for v in w.iter_mut().skip(2) {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
+        x = xorshift(x);
         *v = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
     }
 }

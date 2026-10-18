@@ -1,13 +1,13 @@
 //! Windows: disk and volume enumeration, drive identity, USB link speed, the
 //! system-disk guard, raw disk access, elevation, free-space mapping, diskpart.
 
-use super::{DiskInfo, UsbInfo, VolumeInfo};
-use crate::dev::{ALIGN, Dev, FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH};
+use super::{check_disk, DiskInfo, UsbInfo, VolumeInfo};
+use crate::dev::{ALIGN, Dev, FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH, pread_full, pwrite_all};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation as di;
@@ -468,26 +468,13 @@ pub fn list_disks() -> Vec<DiskInfo> {
     disks.sort_by_key(|d| d.id.parse::<u32>().unwrap_or(u32::MAX));
     for d in &mut disks {
         d.volumes = vols.iter().filter(|v| v.extents.iter().any(|e| e.0 == d.id)).cloned().collect();
-        d.protected = match &prot {
-            Ok(m) => m.get(&d.id).cloned(),
-            Err(e) => Some(format!("cannot identify the system disk ({e}); refusing all disks")),
-        };
     }
+    super::mark_protected(&mut disks, &prot);
     disks
 }
 
 pub fn disk(id: &str) -> io::Result<DiskInfo> {
-    let n = id.trim().trim_start_matches(r"\\.\PhysicalDrive");
-    list_disks().into_iter().find(|d| d.id == n).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("disk {id} not found")))
-}
-
-/// A disk that may be tested, or a refusal message.
-pub fn check_disk(n: &str) -> Result<DiskInfo, String> {
-    let d = disk(n).map_err(|e| e.to_string())?;
-    if let Some(why) = &d.protected {
-        return Err(format!("Disk {n} ({}) is protected: {why}. This operation is not allowed.", d.name()));
-    }
-    Ok(d)
+    super::find_disk(id, id.trim().trim_start_matches(r"\\.\PhysicalDrive"))
 }
 
 /// The volume and disk behind a target folder, or a refusal message.
@@ -502,12 +489,7 @@ pub fn check_path(p: &Path) -> Result<(VolumeInfo, Option<DiskInfo>), String> {
     if v.extents.is_empty() {
         return Err(format!("{}: cannot map the volume to a disk, refusing (network share or unsupported volume?)", p.display()));
     }
-    let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
-    for e in &v.extents {
-        if let Some(why) = prot.get(&e.0) {
-            return Err(format!("{} is on disk {} which is protected: {why}. This operation is not allowed.", p.display(), e.0));
-        }
-    }
+    super::refuse_protected(p, &v)?;
     let d = if v.extents.len() == 1 { disk(&v.extents[0].0).ok() } else { None };
     Ok((v, d))
 }
@@ -556,9 +538,7 @@ impl RawDisk {
         if write {
             // Re-check right before writing: disk numbers can move when devices come and go.
             let now = check_disk(&d.id).map_err(io::Error::other)?;
-            if now.instance_id != d.instance_id || now.size != d.size || now.serial != d.serial {
-                return Err(io::Error::other(format!("disk {} is no longer the drive that was selected; refusing access", d.id)));
-            }
+            d.check_identity(&now).map_err(io::Error::other)?;
             for v in &current.volumes {
                 locks.push(lock_volume(v)?);
             }
@@ -616,25 +596,11 @@ impl Dev for RawDisk {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
         }
         self.wrote = true;
-        let mut done = 0;
-        while done < buf.len() {
-            let n = self.file.seek_write(&buf[done..], off + done as u64)?;
-            if n == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "disk stopped accepting writes")); }
-            done += n;
-        }
-        Ok(())
+        pwrite_all(&self.file, buf, off)
     }
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
         let n = (buf.len() as u64).min(self.size.saturating_sub(off)) as usize;
-        let mut done = 0;
-        while done < n {
-            let r = self.file.seek_read(&mut buf[done..n], off + done as u64)?;
-            if r == 0 {
-                break;
-            }
-            done += r;
-        }
-        Ok(done)
+        pread_full(&self.file, &mut buf[..n], off)
     }
     fn flush(&mut self) -> io::Result<()> {
         if self.writable { self.file.sync_all() } else { Ok(()) }
@@ -750,6 +716,12 @@ pub fn reports_dir() -> PathBuf {
 
 /// Nothing to do on Windows: an elevated process writes as the same user.
 pub fn give_to_user(_p: &Path) {}
+
+/// A modal error message, for when there is no window to show it in.
+pub fn error_box(title: &str, msg: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MessageBoxW};
+    unsafe { MessageBoxW(std::ptr::null_mut(), wide(msg).as_ptr(), wide(title).as_ptr(), MB_ICONERROR) };
+}
 
 pub fn open_file(p: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -895,7 +867,7 @@ pub fn allocate_and_map(f: &File, len: u64, root: &Path, vol: &VolumeInfo) -> io
 /// One partition of `size_mib` (None = whole disk) formatted with `fs`, via diskpart.
 pub fn repartition(disk: &DiskInfo, size_mib: Option<u64>, fs: &str, label: &str) -> Result<String, String> {
     let size_arg = size_mib.map(|m| format!(" size={m}")).unwrap_or_default();
-    let style = if disk.size > (2u64 << 40) { "gpt" } else { "mbr" };
+    let style = if disk.size > super::MBR_LIMIT { "gpt" } else { "mbr" };
     let script = format!("select disk {}\nclean\nconvert {style}\ncreate partition primary{size_arg}\nformat fs={fs} label=\"{label}\" quick\nassign\n", disk.id);
     let path = std::env::temp_dir().join(format!("flashtester-fix-{}.txt", std::process::id()));
     std::fs::write(&path, &script).map_err(|e| e.to_string())?;

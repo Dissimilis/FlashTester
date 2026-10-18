@@ -182,7 +182,7 @@ pub fn run_plug_pull(w: &Where, checkpoint: u64, ctx: &Ctx) -> Report {
         return rep;
     }
     let pat = Pattern::Seeded { tag: new_tag() };
-    let free = crate::fulltest::free_space(root).unwrap_or(0) / MIB * MIB;
+    let free = crate::platform::free_space(root).unwrap_or(0) / MIB * MIB;
     let m = Manifest {
         tool: crate::report::tool_name(),
         created: crate::engine::now(),
@@ -197,7 +197,7 @@ pub fn run_plug_pull(w: &Where, checkpoint: u64, ctx: &Ctx) -> Report {
         claimed: vol.size,
     };
     save_manifest(&m, Some(&dir));
-    let free = crate::fulltest::free_space(root).unwrap_or(0) / MIB * MIB;
+    let free = crate::platform::free_space(root).unwrap_or(0) / MIB * MIB;
     if free < checkpoint.max(64 * MIB) {
         rep.set(Status::Refused, format!("Only {} free: the pull-the-plug test needs at least {}.", size(free), size(checkpoint.max(64 * MIB))));
         rep.finish(t0);

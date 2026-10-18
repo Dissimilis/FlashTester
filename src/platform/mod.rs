@@ -4,8 +4,13 @@
 //! same functions over the shared types here.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::fs::File;
+use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 #[cfg(windows)]
 mod windows;
@@ -273,6 +278,84 @@ pub fn first_partition(disk_path: &str) -> String {
 }
 
 // Helpers shared by the Unix platforms.
+
+/// Disks above this size get GPT when repartitioned: MBR cannot address them.
+const MBR_LIMIT: u64 = 2 << 40;
+
+/// Sets each disk's protection; when the system disk can't be found, every disk is refused.
+fn mark_protected(disks: &mut [DiskInfo], prot: &io::Result<BTreeMap<String, String>>) {
+    for d in disks {
+        d.protected = match prot {
+            Ok(m) => m.get(&d.id).cloned(),
+            Err(e) => Some(format!("cannot identify the system disk ({e}); refusing all disks")),
+        };
+    }
+}
+
+/// The listed disk `id` names; `n` is `id` without its device-path prefix.
+fn find_disk(id: &str, n: &str) -> io::Result<DiskInfo> {
+    list_disks().into_iter().find(|d| d.id == n).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("disk {id} not found")))
+}
+
+/// A disk that may be tested, or a refusal message.
+pub fn check_disk(id: &str) -> Result<DiskInfo, String> {
+    let d = disk(id).map_err(|e| e.to_string())?;
+    if let Some(why) = &d.protected {
+        return Err(format!("Disk {} ({}) is protected: {why}. This operation is not allowed.", d.id, d.name()));
+    }
+    Ok(d)
+}
+
+/// Refuses a folder whose volume reaches a protected disk.
+fn refuse_protected(p: &Path, v: &VolumeInfo) -> Result<(), String> {
+    let prot = protected_disks().map_err(|e| format!("cannot identify the system disk ({e}); refusing"))?;
+    for e in &v.extents {
+        if let Some(why) = prot.get(&e.0) {
+            return Err(format!("{} is on disk {} which is protected: {why}. This operation is not allowed.", p.display(), e.0));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    statvfs(&path.to_string_lossy()).map(|s| s.1).ok_or_else(io::Error::last_os_error)
+}
+
+#[cfg(unix)]
+pub fn alloc_unit(root: &Path) -> io::Result<u64> {
+    statvfs(&root.to_string_lossy()).map(|s| s.2).ok_or_else(io::Error::last_os_error)
+}
+
+/// Identity of the file system an open file lives on.
+#[cfg(unix)]
+pub fn fs_id(f: &File) -> io::Result<u64> {
+    Ok(f.metadata()?.dev())
+}
+
+/// Identity of the file system holding `p`.
+#[cfg(unix)]
+pub fn fs_id_path(p: &Path) -> io::Result<u64> {
+    Ok(std::fs::metadata(p)?.dev())
+}
+
+/// No-op outside Windows: servers don't suspend, and inhibiting it on Linux needs a session bus.
+#[cfg(unix)]
+pub struct KeepAwake;
+
+#[cfg(unix)]
+impl KeepAwake {
+    pub fn new() -> KeepAwake {
+        KeepAwake
+    }
+}
+
+#[cfg(unix)]
+impl Default for KeepAwake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// (usable size, free for us, block size). The usable size leaves out space
 /// reserved for root (ext4's 5%), so size - free is what files really use.

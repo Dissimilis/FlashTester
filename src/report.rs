@@ -691,7 +691,7 @@ impl Report {
     /// Best estimate of the real capacity, if the test found the drive fake.
     pub fn real_capacity(&self) -> Option<u64> {
         if let Some(p) = &self.probe {
-            return (p.finding == "fake" && p.usable > 0).then_some(p.usable);
+            return (p.finding == crate::probe::Finding::Fake && p.usable > 0).then_some(p.usable);
         }
         if self.verdict.status == Status::Fake
             && let Some(v) = self.verify.last() {

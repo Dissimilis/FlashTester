@@ -102,6 +102,30 @@ pub fn pwrite(f: &File, buf: &[u8], off: u64) -> io::Result<usize> {
     }
 }
 
+/// Writes all of `buf` at `off`; a write of zero bytes is an error.
+pub fn pwrite_all(f: &File, buf: &[u8], off: u64) -> io::Result<()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let n = pwrite(f, &buf[done..], off + done as u64)?;
+        if n == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "disk stopped accepting writes")); }
+        done += n;
+    }
+    Ok(())
+}
+
+/// Reads into `buf` at `off` until it is full or the data ends; returns bytes read.
+pub fn pread_full(f: &File, buf: &mut [u8], off: u64) -> io::Result<usize> {
+    let mut done = 0;
+    while done < buf.len() {
+        let n = pread(f, &mut buf[done..], off + done as u64)?;
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    Ok(done)
+}
+
 /// Page-aligned heap buffer, as unbuffered I/O requires.
 pub struct AlignedBuf {
     ptr: *mut u8,
@@ -274,15 +298,7 @@ impl Dev for FileSet {
             Err(e) if e.kind() == io::ErrorKind::NotFound && dir_ok => return Ok(0),
             Err(e) => return Err(e),
         };
-        let mut done = 0;
-        while done < buf.len() {
-            let n = pread(f, &mut buf[done..], pos + done as u64)?;
-            if n == 0 {
-                break;
-            }
-            done += n;
-        }
-        Ok(done)
+        pread_full(f, buf, pos)
     }
     fn flush(&mut self) -> io::Result<()> {
         if let Some((_, f, true)) = &self.open {

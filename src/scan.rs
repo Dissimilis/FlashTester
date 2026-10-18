@@ -2,7 +2,7 @@
 
 use crate::ctx::Ctx;
 use crate::dev::{AlignedBuf, Dev, is_disconnect};
-use crate::engine::{BadRange, Event, IoStats, MapPoint, Stop};
+use crate::engine::{BadRange, Event, IoStats, MapPoint, Stop, push_range};
 use crate::report::size;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -70,11 +70,7 @@ pub fn run_scan(dev: &mut dyn Dev, limit: Option<u64>, block: usize, ctx: &Ctx) 
     let bad = |r: &mut ScanResult, o: u64, n: u64| {
         r.bad_bytes += n;
         ctx.mark(o, o + n, "unreadable");
-        if let Some(last) = r.bad_ranges.last_mut().filter(|l| l.end == o) {
-            last.end += n;
-        } else if r.bad_ranges.len() < 1000 {
-            r.bad_ranges.push(BadRange { start: o, end: o + n, kind: "unreadable".into() });
-        }
+        push_range(&mut r.bad_ranges, o, n, "unreadable");
     };
     while off < len {
         if ctx.cancelled() {

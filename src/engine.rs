@@ -124,16 +124,9 @@ impl Tally {
     }
 
     fn bad(&mut self, off: u64, len: u64, kind: &str) {
-        if let Some(r) = self.bad_ranges.last_mut()
-            && r.end == off && r.kind == kind {
-                r.end += len;
-                return;
-            }
-        if self.bad_ranges.len() >= 1000 {
+        if !push_range(&mut self.bad_ranges, off, len, kind) {
             self.bad_ranges_truncated = true;
-            return;
         }
-        self.bad_ranges.push(BadRange { start: off, end: off + len, kind: kind.to_string() });
     }
 
     pub fn add(&mut self, off: u64, class: Class, first: Option<(u64, u64)>) {
@@ -378,6 +371,24 @@ pub fn write_pass(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block: 
     WriteResult { stats, end: pos, stop, events }
 }
 
+/// Adds `[off, off + len)` to `ranges`, extending the last range when it joins
+/// on; false when the list is full (1000 ranges) and the range was dropped.
+pub fn push_range(ranges: &mut Vec<BadRange>, off: u64, len: u64, kind: &str) -> bool {
+    if let Some(r) = ranges.last_mut()
+        && r.end == off && r.kind == kind {
+            r.end += len;
+            return true;
+        }
+    if ranges.len() >= 1000 {
+        return false;
+    }
+    ranges.push(BadRange { start: off, end: off + len, kind: kind.to_string() });
+    true
+}
+
+/// How a read-only early abort starts; `fulltest::judge` keys on it.
+pub const IGNORES_WRITES: &str = "The drive ignores writes";
+
 /// Flush and read back the first block just written: catches drives that
 /// silently ignore writes before hours are spent filling them.
 fn readback(dev: &mut dyn Dev, pat: Pattern, off: u64, n: usize, before: Option<u64>) -> Option<String> {
@@ -392,7 +403,7 @@ fn readback(dev: &mut dyn Dev, pat: Pattern, off: u64, n: usize, before: Option<
     }
     if t.stale > 0 || before == Some(hash(&b[..n])) {
         let what = if t.stale > 0 { "data from an earlier run" } else { "exactly what was there before" };
-        return Some(format!("The drive ignores writes: the first block written read back as {what}. It is read-only or broken."));
+        return Some(format!("{IGNORES_WRITES}: the first block written read back as {what}. It is read-only or broken."));
     }
     Some(format!("The first block written came back wrong ({} of {} sectors bad).", t.lost(), n / SECTOR))
 }
@@ -410,9 +421,7 @@ pub fn spot_check(dev: &mut dyn Dev, pat: Pattern, start: u64, written: u64, n: 
     let mut rng = crate::pattern::new_tag();
     for i in 0..n {
         // Stratified: one random block in each of n equal slices.
-        rng ^= rng << 13;
-        rng ^= rng >> 7;
-        rng ^= rng << 17;
+        rng = crate::pattern::xorshift(rng);
         let slice = span / n as u64;
         let b = if slice > 0 { i as u64 * slice + rng % slice } else { rng % span };
         let off = start + b * blk;

@@ -29,6 +29,17 @@ fn ctx_err(what: &str, e: io::Error) -> io::Error {
     io::Error::new(e.kind(), format!("{what}: {e}"))
 }
 
+/// What the probe concluded.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Finding {
+    #[default]
+    Genuine,
+    Fake,
+    Defective,
+    ReadOnly,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ProbeResult {
     /// "raw" or "free-space"
@@ -46,8 +57,7 @@ pub struct ProbeResult {
     pub usable: u64,
     /// Wraparound period, if seen.
     pub module: Option<u64>,
-    /// genuine | fake | defective | read-only
-    pub finding: String,
+    pub finding: Finding,
     pub seconds: f64,
     pub examples: Vec<String>,
 }
@@ -62,17 +72,16 @@ impl ProbeResult {
             size(self.claimed),
             self.seconds
         )];
-        match self.finding.as_str() {
-            "genuine" => v.push(format!("All sampled positions retained their data. Sampling interval: {}. Run a full test to check the space between them.", size(self.step))),
-            "fake" => {
+        match self.finding {
+            Finding::Genuine => v.push(format!("All sampled positions retained their data. Sampling interval: {}. Run a full test to check the space between them.", size(self.step))),
+            Finding::Fake => {
                 v.push(format!("Only about {} really stores data ({:.1}% of the claimed {}).", size(self.usable), self.usable as f64 * 100.0 / self.claimed.max(1) as f64, size(self.claimed)));
                 if let Some(m) = self.module {
                     v.push(format!("Writes past that point wrap around and overwrite the start of the drive (period {}).", size(m)));
                 }
             }
-            "defective" => v.push(format!("{} of {} sampled positions lost data at scattered locations. First failure at {}. The drive or its connection may be faulty.", self.bad, self.positions.len(), size(self.first_bad.unwrap_or(0)))),
-            "read-only" => v.push("No sampled position retained the test data. The drive may be ignoring writes or may be faulty.".into()),
-            _ => {}
+            Finding::Defective => v.push(format!("{} of {} sampled positions lost data at scattered locations. First failure at {}. The drive or its connection may be faulty.", self.bad, self.positions.len(), size(self.first_bad.unwrap_or(0)))),
+            Finding::ReadOnly => v.push("No sampled position retained the test data. The drive may be ignoring writes or may be faulty.".into()),
         }
         for e in self.examples.iter().take(5) {
             v.push(format!("  {e}"));
@@ -278,23 +287,23 @@ pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode
     r.bad = bad.len() as u64;
     r.first_bad = bad.first().map(|&i| positions[i]);
     r.usable = claimed;
-    r.finding = "genuine".into();
+    r.finding = Finding::Genuine;
     if let Some(&fb) = bad.first() {
         let after = positions.len() - fb;
         let tail_bad = bad.len() as f64 >= after as f64 * 0.9 && (after >= 4 || r.module.is_some());
         if bad.len() == positions.len() {
-            r.finding = "read-only".into();
+            r.finding = Finding::ReadOnly;
             r.usable = 0;
         } else if let Some(m) = r.module {
             // Data turning up at another position proves wraparound: fake capacity,
             // even when an isolated bad block lies below the boundary.
-            r.finding = "fake".into();
+            r.finding = Finding::Fake;
             r.usable = m;
         } else if tail_bad && fb > 0 {
-            r.finding = "fake".into();
+            r.finding = Finding::Fake;
             r.usable = refine(dev, positions[fb - 1], positions[fb], block, ctx)?;
         } else {
-            r.finding = "defective".into();
+            r.finding = Finding::Defective;
             r.usable = positions[fb];
         }
     }
@@ -347,7 +356,7 @@ impl FreeSpaceDev {
         crate::fulltest::make_dir(dir).map_err(|e| ctx_err("create folder", e))?;
         let unit = platform::alloc_unit(root)?.max(4096);
         let want_fs = platform::fs_id_path(dir)?;
-        let free = crate::fulltest::free_space(root)?;
+        let free = platform::free_space(root)?;
         let mut left = free.saturating_sub(64 * MIB) / unit * unit;
         let mut d = FreeSpaceDev { files: vec![], paths: vec![], map: vec![], disk_len: disk.size };
         ctx.phase("Allocating free space", left);
@@ -457,14 +466,14 @@ mod tests {
     #[test]
     fn genuine_drive() {
         let r = probe(512 * MIB, 512 * MIB, SimMode::Genuine);
-        assert_eq!(r.finding, "genuine");
+        assert_eq!(r.finding, Finding::Genuine);
         assert_eq!(r.usable, 512 * MIB);
     }
 
     #[test]
     fn wraparound_fake() {
         let r = probe(256 * MIB, 2 * GIB, SimMode::Wrap);
-        assert_eq!(r.finding, "fake");
+        assert_eq!(r.finding, Finding::Fake);
         assert_eq!(r.module, Some(256 * MIB));
         assert_eq!(r.usable, 256 * MIB);
     }
@@ -473,14 +482,14 @@ mod tests {
     fn dropping_fake_is_refined() {
         let real = 300 * MIB + 4096 * 10;
         let r = probe(real, 2 * GIB, SimMode::Drop);
-        assert_eq!(r.finding, "fake");
+        assert_eq!(r.finding, Finding::Fake);
         assert!(r.usable <= real && real - r.usable <= MIB, "usable {} real {}", r.usable, real);
     }
 
     #[test]
     fn read_only_drive() {
         let r = probe(512 * MIB, 512 * MIB, SimMode::ReadOnly);
-        assert_eq!(r.finding, "read-only");
+        assert_eq!(r.finding, Finding::ReadOnly);
     }
 }
 
@@ -530,7 +539,7 @@ mod wrap_with_bad_block {
         let (step, pos) = grid(claimed, BLOCK as u64, 256);
         let mut d = BadAt(MemDev::new(real, claimed, SimMode::Wrap), 2 * step);
         let r = run(&mut d, pos, step, claimed, "raw", &Ctx::new()).unwrap();
-        assert_eq!(r.finding, "fake");
+        assert_eq!(r.finding, Finding::Fake);
         assert_eq!(r.usable, 256 * MIB);
     }
 }
@@ -548,7 +557,7 @@ mod small_wrap {
         assert!(step > real);
         let mut d = MemDev::new(real, claimed, SimMode::Wrap);
         let r = run(&mut d, pos, step, claimed, "raw", &Ctx::new()).unwrap();
-        assert_eq!(r.finding, "fake");
+        assert_eq!(r.finding, Finding::Fake);
         assert_eq!(r.module, Some(8 * MIB));
         assert_eq!(r.usable, 8 * MIB);
     }

@@ -47,8 +47,8 @@ Run without arguments, or with `gui`, for the GUI.");
 #[cfg(not(any(windows, target_os = "linux")))]
 const AFTER: &str = after!("");
 
-/// What `fix` formats with unless told otherwise: FreeBSD's base system has no exFAT.
-const DEFAULT_FS: &str = if cfg!(target_os = "freebsd") { "fat32" } else { "exfat" };
+/// What `fix` formats with unless told otherwise.
+const DEFAULT_FS: &str = crate::fix::FILESYSTEMS[0];
 
 #[derive(Args, Clone)]
 struct TargetArg {
@@ -447,11 +447,7 @@ fn smart(t: &TargetArg, json: bool) -> i32 {
 fn disk_of(t: &TargetArg) -> Result<platform::DiskInfo, String> {
     match (&t.path, t.disk.as_deref()) {
         (Some(p), None) => {
-            let mut s = p.clone();
-            if cfg!(windows) && s.len() == 2 {
-                s.push('\\');
-            }
-            match platform::volume_of_path(std::path::Path::new(&s)) {
+            match platform::volume_of_path(&app::folder(p)) {
                 Ok(v) => match v.extents.first() {
                     Some(e) => platform::disk(&e.0).map_err(|e| e.to_string()),
                     None => Err("volume is not on a local disk".into()),

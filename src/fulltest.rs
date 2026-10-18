@@ -146,10 +146,6 @@ pub fn load_manifest(path: &Path) -> io::Result<Manifest> {
     serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)
 }
 
-pub fn free_space(path: &Path) -> io::Result<u64> {
-    crate::platform::free_space(path)
-}
-
 /// Delete FlashTester test data under `root`. Returns (files, bytes) removed.
 pub fn clean(root: &Path) -> io::Result<(u64, u64)> {
     let dir = data_dir(root);
@@ -205,7 +201,7 @@ fn prepare(w: &Where, o: &TestOpts, pat: Pattern, ctx: &Ctx) -> io::Result<(Box<
                 claimed: vol.size,
             };
             save_manifest(&m, Some(&dir));
-            let free = free_space(root)?;
+            let free = crate::platform::free_space(root)?;
             let len = o.size.unwrap_or(u64::MAX).min(free) / MIB * MIB;
             m.bytes = len;
             save_manifest(&m, Some(&dir));
@@ -244,6 +240,28 @@ fn finish_manifest(w: &Where, pat: Pattern, end: u64, complete: bool) {
         };
         save_manifest(&m, dir.as_deref());
     }
+}
+
+/// After the user unplugs and replugs the drive: check it is the same drive
+/// (and, in file mode, the same volume), then reopen the test data for verifying.
+fn reconnect(w: &mut Where, end: u64, rep: &mut Report, ctx: &Ctx) -> Result<Box<dyn Dev>, String> {
+    let (changes, now) = crate::trust::replug(w, ctx)?;
+    if !changes.is_empty() {
+        rep.identity_changes.extend(changes);
+        return Err("The drive identity changed after reconnecting. Testing stopped.".into());
+    }
+    if let Where::Dir { root, vol, .. } = &*w {
+        let again = crate::platform::check_path(root);
+        let same = again.as_ref().is_ok_and(|(v, _)| v.fs == vol.fs && v.label == vol.label && v.size.abs_diff(vol.size) <= MIB);
+        if !same {
+            let why = again.err().unwrap_or_else(|| format!("a different volume is now at {}", root.display()));
+            return Err(format!("After reconnecting: {why}. Testing stopped."));
+        }
+    }
+    if let (Where::Disk(d), Some(n)) = (&mut *w, now) {
+        *d = n;
+    }
+    open_dev(w, end, false).map_err(|e| format!("Cannot reopen the drive after reconnecting: {e}"))
 }
 
 /// Full write + verify test; with `passes != 1` an endurance loop.
@@ -290,36 +308,10 @@ pub fn run_test(w: &Where, o: &TestOpts, ctx: &Ctx) -> Report {
         }
         if o.replug {
             drop(dev);
-            match crate::trust::replug(w, ctx) {
-                Ok((changes, now)) => {
-                    if !changes.is_empty() {
-                        rep.identity_changes.extend(changes);
-                        rep.set(Status::Error, "The drive identity changed after reconnecting. Testing stopped.");
-                        break;
-                    }
-                    if let Where::Dir { root, vol, .. } = &*w {
-                        let again = crate::platform::check_path(root);
-                        let same = again.as_ref().is_ok_and(|(v, _)| v.fs == vol.fs && v.label == vol.label && v.size.abs_diff(vol.size) <= MIB);
-                        if !same {
-                            let why = again.err().unwrap_or_else(|| format!("a different volume is now at {}", root.display()));
-                            rep.set(Status::Error, format!("After reconnecting: {why}. Testing stopped."));
-                            break;
-                        }
-                    }
-                    rep.identity_changes.extend(changes);
-                    if let (Where::Disk(d), Some(n)) = (&mut *w, now) {
-                        *d = n;
-                    }
-                }
-                Err(e) => {
-                    rep.set(Status::Error, e);
-                    break;
-                }
-            }
-            dev = match open_dev(w, end, false) {
+            dev = match reconnect(w, end, &mut rep, ctx) {
                 Ok(d) => d,
                 Err(e) => {
-                    rep.set(Status::Error, format!("Cannot reopen the drive after reconnecting: {e}"));
+                    rep.set(Status::Error, e);
                     break;
                 }
             };
@@ -442,7 +434,7 @@ pub fn judge(rep: &mut Report) {
         d.push("Some reads failed or returned different data on retry. The drive or its connection may be faulty. Try another port, cable or reader.".into());
     }
 
-    let readonly_early = early.as_deref().is_some_and(|m| m.contains("ignores writes"));
+    let readonly_early = early.as_deref().is_some_and(|m| m.starts_with(crate::engine::IGNORES_WRITES));
     let (status, headline) = if readonly_early || (t.stale > 0 && t.stale * 2 >= lost && lost > 0) {
         (Status::ReadOnly, "The drive ignores writes: data read back is old or never changed.".to_string())
     } else if merged.aliased > 0 || tail_at.is_some() {

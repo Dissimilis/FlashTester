@@ -5,7 +5,7 @@ use crate::ctx::Ctx;
 use crate::dev::{GIB, MIB};
 use crate::fulltest::{self, TestOpts, VerifySource, Where, data_dir};
 use crate::platform::{self, DiskInfo, RawDisk};
-use crate::probe::{self, FreeSpaceDev};
+use crate::probe::{self, Finding, FreeSpaceDev};
 use crate::report::{Report, Status, size};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -99,15 +99,20 @@ impl Job {
     }
 }
 
-/// A folder (or drive letter) to test in file mode.
-pub fn resolve_path(p: &str) -> Result<Where, String> {
+/// A typed folder or drive letter as a path: quotes dropped, "E:" read as "E:\".
+pub fn folder(p: &str) -> PathBuf {
     let mut s = p.trim().trim_matches('"').to_string();
     if cfg!(windows) && s.len() == 2 && s.ends_with(':') {
         s.push('\\');
     }
-    let root = PathBuf::from(&s);
+    PathBuf::from(s)
+}
+
+/// A folder (or drive letter) to test in file mode.
+pub fn resolve_path(p: &str) -> Result<Where, String> {
+    let root = folder(p);
     if !root.is_dir() {
-        return Err(format!("{s} is not an existing folder or drive."));
+        return Err(format!("{} is not an existing folder or drive.", root.display()));
     }
     let (vol, disk) = platform::check_path(&root)?;
     Ok(Where::Dir { root, vol, disk })
@@ -270,16 +275,16 @@ fn run_probe(w: &Where, ctx: &Ctx) -> Report {
     };
     match result {
         Ok(p) => {
-            let (st, head) = match p.finding.as_str() {
-                "genuine" => (Status::Ok, format!("All {} sampled positions across {} kept their data. Run a full test to check the space between them.", p.positions.len(), size(p.claimed))),
-                "fake" => (Status::Fake, format!("Fake capacity: only about {} of the claimed {} stores data.", size(p.usable), size(p.claimed))),
-                "defective" => (Status::Defective, format!("{} of {} sampled positions lost data. The drive or its connection may be faulty.", p.bad, p.positions.len())),
-                _ => (Status::ReadOnly, "The drive did not retain the written data. It may be read-only or faulty.".to_string()),
+            let (st, head) = match p.finding {
+                Finding::Genuine => (Status::Ok, format!("All {} sampled positions across {} kept their data. Run a full test to check the space between them.", p.positions.len(), size(p.claimed))),
+                Finding::Fake => (Status::Fake, format!("Fake capacity: only about {} of the claimed {} stores data.", size(p.usable), size(p.claimed))),
+                Finding::Defective => (Status::Defective, format!("{} of {} sampled positions lost data. The drive or its connection may be faulty.", p.bad, p.positions.len())),
+                Finding::ReadOnly => (Status::ReadOnly, "The drive did not retain the written data. It may be read-only or faulty.".to_string()),
             };
             rep.set(st, head);
             // Free space may cover only the low addresses, where every fake still works.
             let top = p.positions.last().copied().unwrap_or(0);
-            if p.mode == "free-space" && p.finding == "genuine" && (p.positions.len() < 16 || top < p.claimed / 10 * 9) {
+            if p.mode == "free-space" && p.finding == Finding::Genuine && (p.positions.len() < 16 || top < p.claimed / 10 * 9) {
                 rep.set(
                     Status::Info,
                     format!("Inconclusive: sampled free space reaches only {} of {}. Capacity beyond that was not checked. Free up space or use a whole-disk probe, which erases data.", size(top), size(p.claimed)),
@@ -287,7 +292,7 @@ fn run_probe(w: &Where, ctx: &Ctx) -> Report {
             } else if p.mode == "free-space" && p.positions.len() < 64 {
                 rep.warnings.push(format!("Only {} positions were tested in free space, so the capacity estimate has limited precision.", p.positions.len()));
             }
-            if p.finding == "fake"
+            if p.finding == Finding::Fake
                 && let Where::Disk(d) = w {
                     rep.verdict.details.push(format!("To erase the drive and format the estimated usable space: {}", platform::fix_hint(&d.id, Some(p.usable))));
                 }
@@ -346,7 +351,7 @@ fn iops(w: &Where, secs: f64, write: bool, ctx: &Ctx) -> Report {
             let dir = data_dir(root);
             fulltest::make_dir(&dir)?;
             let path = dir.join("iops.fti");
-            let free = fulltest::free_space(root)?;
+            let free = platform::free_space(root)?;
             let len = GIB.min(free / 2) / MIB * MIB;
             if len < 64 * MIB {
                 return Err(std::io::Error::other("need at least 128 MB free"));
@@ -424,11 +429,11 @@ fn fix(disk: &DiskInfo, sz: &FixSize, fs: &str, label: &str, ctx: &Ctx) -> Repor
         FixSize::Bytes(b) => Some(crate::fix::partition_mib(*b)),
         FixSize::Probe => {
             let p = run_probe(&w, ctx);
-            let usable = p.probe.as_ref().map(|x| (x.finding.clone(), x.usable));
+            let usable = p.probe.as_ref().map(|x| (x.finding, x.usable));
             rep.probe = p.probe.clone();
             match usable {
-                Some((f, u)) if f == "fake" => Some(crate::fix::partition_mib(u)),
-                Some((f, _)) if f == "genuine" => None,
+                Some((Finding::Fake, u)) => Some(crate::fix::partition_mib(u)),
+                Some((Finding::Genuine, _)) => None,
                 _ => {
                     rep.verdict = p.verdict;
                     rep.verdict.details.push("Formatting stopped because the probe could not establish a usable capacity boundary.".into());
@@ -467,7 +472,7 @@ fn bench(w: &Where, len: u64, write: bool, ctx: &Ctx) -> Report {
                 fulltest::remove_data_dir(&dir)?;
                 fulltest::make_dir(&dir)?;
                 let result = (|| {
-                    let free = fulltest::free_space(root)?;
+                    let free = platform::free_space(root)?;
                     let len = len.min(free.saturating_sub(64 * MIB)) / MIB * MIB;
                     if len < 16 * MIB {
                         return Err(std::io::Error::other("need at least 80 MB free"));

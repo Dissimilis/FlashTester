@@ -1,7 +1,7 @@
 use flashtester::{
     engine::{BadRange, Event, IoStats, Stop, Tally, VerifyResult},
     perf::{IopsResult, IopsRow},
-    probe::ProbeResult,
+    probe::{Finding, ProbeResult},
     report::{Report, Status, Target},
 };
 
@@ -32,7 +32,7 @@ fn sparse_probe_is_not_evidence_of_full_capacity() {
     for status in [Status::Ok, Status::Info] {
         let mut report = Report::new("probe", Target { claimed: 128 * MIB, ..Default::default() });
         report.set(status, "Samples retained their data");
-        report.probe = Some(ProbeResult { finding: "genuine".into(), usable: 128 * MIB, claimed: 128 * MIB, ..Default::default() });
+        report.probe = Some(ProbeResult { finding: Finding::Genuine, usable: 128 * MIB, claimed: 128 * MIB, ..Default::default() });
         assert_eq!(report.real_capacity(), None);
         let html = report.evidence_html();
         assert!(!html.contains("Estimated usable capacity"));
@@ -41,7 +41,7 @@ fn sparse_probe_is_not_evidence_of_full_capacity() {
         assert!(!html.contains("Every 512-byte sector was written"));
     }
     let mut report = Report::new("probe", Target::default());
-    report.probe = Some(ProbeResult { finding: "fake".into(), usable: 32 * MIB, claimed: 128 * MIB, ..Default::default() });
+    report.probe = Some(ProbeResult { finding: Finding::Fake, usable: 32 * MIB, claimed: 128 * MIB, ..Default::default() });
     assert_eq!(report.real_capacity(), Some(32 * MIB));
     assert!(report.evidence_html().contains("Estimated usable capacity"));
 }

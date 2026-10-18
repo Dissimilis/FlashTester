@@ -93,6 +93,10 @@ enum Cmd {
         #[arg(long, hide = true)]
         xauthority: Option<PathBuf>,
     },
+    /// Internal: a root GUI saves the desktop user's reports through this, run as that user.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[command(hide = true)]
+    WriteNewFile { path: PathBuf },
     /// List disks and volumes, with identity, link speed and whether they may be tested.
     List,
     /// Show the identity of a drive: vendor, model, serial, USB ID, link speed.
@@ -644,6 +648,17 @@ pub fn main() -> i32 {
                 }
             }
             return crate::gui::run();
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        Cmd::WriteNewFile { path } => {
+            let mut data = vec![];
+            return match std::io::Read::read_to_end(&mut std::io::stdin(), &mut data).and_then(|_| crate::platform::write_new_file(path, &data)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("Cannot write {}: {e}", path.display());
+                    3
+                }
+            };
         }
         Cmd::List => return list(cli.json),
         Cmd::Info(t) => return info(t, cli.json),

@@ -561,7 +561,8 @@ impl Gui {
     fn save(&mut self, evidence: bool) {
         let Some(rep) = &self.result else { return };
         let dir = platform::reports_dir();
-        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        // Milliseconds: report files are never overwritten, and both buttons write a JSON.
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
         let (name, body) = if evidence { (format!("evidence-{stamp}.html"), rep.evidence_html()) } else { (format!("report-{}-{stamp}.html", rep.command), rep.html()) };
         let p = dir.join(name);
         let json = dir.join(format!("report-{}-{stamp}.json", rep.command));
@@ -1786,17 +1787,12 @@ fn info_card(ui: &mut egui::Ui, fill: Color32, stroke: Color32, head: &str, head
     });
 }
 
-/// Writes `rep` as JSON and `body` as HTML, creating their folder, and hands
-/// all three to the desktop user (the GUI may run elevated).
+/// Writes `rep` as JSON and `body` as HTML into new files in their folder, for the
+/// desktop user (the GUI may run elevated).
 fn write_report(rep: &Report, json: &std::path::Path, html: &std::path::Path, body: &str) -> std::io::Result<()> {
     let dir = html.parent().unwrap_or(html);
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(json, serde_json::to_string_pretty(rep)?)?;
-    std::fs::write(html, body)?;
-    platform::give_to_user(dir);
-    platform::give_to_user(json);
-    platform::give_to_user(html);
-    Ok(())
+    let name = |p: &std::path::Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    platform::write_user_files(dir, &[(&name(json), serde_json::to_string_pretty(rep)?.as_bytes()), (&name(html), body.as_bytes())])
 }
 
 /// The SMART view's content: alarms, the important counters, then every counter.

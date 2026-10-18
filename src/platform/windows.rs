@@ -714,8 +714,23 @@ pub fn reports_dir() -> PathBuf {
     std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join("Documents").join("FlashTester")
 }
 
-/// Nothing to do on Windows: an elevated process writes as the same user.
-pub fn give_to_user(_p: &Path) {}
+/// Where full tests keep a copy of their manifest, in case the drive loses it.
+pub fn manifest_dir() -> std::io::Result<PathBuf> {
+    let d = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("FlashTester").join("manifests");
+    std::fs::create_dir_all(&d)?;
+    Ok(d)
+}
+
+/// Creates `dir` and new files in it (never overwriting). An elevated process on
+/// Windows writes as the same user, so nothing needs handing over.
+pub fn write_user_files(dir: &Path, files: &[(&str, &[u8])]) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    for (name, data) in files {
+        std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(name))?.write_all(data)?;
+    }
+    Ok(())
+}
 
 /// A modal error message, for when there is no window to show it in.
 pub fn error_box(title: &str, msg: &str) {

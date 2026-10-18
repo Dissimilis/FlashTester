@@ -11,7 +11,7 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::process::Command;
@@ -343,6 +343,28 @@ pub fn fs_id_path(p: &Path) -> io::Result<u64> {
     Ok(std::fs::metadata(p)?.dev())
 }
 
+/// Where full tests keep a copy of their manifest, in case the drive loses it: this
+/// user's own folder in /tmp. Another user may have planted a link or folder under
+/// that name, so it must be a real folder this user owns and nobody else can write
+/// to; /tmp's sticky bit then keeps others from swapping it. Not $TMPDIR: a root
+/// shell may have inherited a folder its user controls.
+#[cfg(unix)]
+pub fn manifest_dir() -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let me = unsafe { libc::geteuid() };
+    let d = Path::new("/tmp").join(format!("flashtester-{me}"));
+    if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&d)
+        && e.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(e);
+    }
+    let m = std::fs::symlink_metadata(&d)?;
+    if !m.is_dir() || m.uid() != me || m.mode() & 0o022 != 0 {
+        return Err(io::Error::other(format!("{} is not a private folder", d.display())));
+    }
+    Ok(d)
+}
+
 /// No-op outside Windows: servers don't suspend, and inhibiting it on Linux needs a session bus.
 #[cfg(unix)]
 pub struct KeepAwake;
@@ -434,6 +456,9 @@ fn run(cmd: &str, args: &[&str], input: Option<&str>) -> Result<String, String> 
 /// The desktop user behind a root GUI started through pkexec, sudo or doas: uid, gid, home.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn invoking_user() -> Option<(u32, u32, PathBuf)> {
+    if !is_admin() {
+        return None;
+    }
     // pkexec and sudo pass the caller's uid, doas only its name.
     let (field, id) = match std::env::var("PKEXEC_UID").or_else(|_| std::env::var("SUDO_UID")) {
         Ok(uid) => (2, uid),
@@ -452,12 +477,43 @@ pub fn reports_dir() -> PathBuf {
     if docs.is_dir() { docs } else { home }.join("FlashTester")
 }
 
-/// A root GUI's report files belong to the desktop user who asked for them.
+/// Creates `dir` and new files in it (never overwriting). A root GUI writes these
+/// into the desktop user's home, which that user controls (links, swapped folders),
+/// so a copy of this exe running as that user does the writing: it can reach
+/// nothing the user could not write anyway.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub fn give_to_user(p: &Path) {
-    if let Some((uid, gid, _)) = invoking_user() {
-        let _ = std::os::unix::fs::chown(p, Some(uid), Some(gid));
+pub fn write_user_files(dir: &Path, files: &[(&str, &[u8])]) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    let Some((uid, gid, _)) = invoking_user() else {
+        for (name, data) in files {
+            write_new_file(&dir.join(name), data)?;
+        }
+        return Ok(());
+    };
+    for (name, data) in files {
+        let mut c = Command::new(std::env::current_exe()?);
+        c.arg("write-new-file").arg(dir.join(name)).uid(uid).gid(gid).current_dir("/").env_clear();
+        // Only stdin and stderr: no descriptor of root's may reach the user's process.
+        let mut child = c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn()?;
+        let sent = child.stdin.take().unwrap().write_all(data);
+        let out = child.wait_with_output()?;
+        sent?;
+        if !out.status.success() {
+            return Err(io::Error::other(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        }
     }
+    Ok(())
+}
+
+/// Creates `path` and its folder, refusing an existing file or link.
+#[cfg(unix)]
+pub fn write_new_file(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(data)
 }
 
 /// Open with the desktop's default app; not as root (browsers refuse or misbehave),
@@ -511,5 +567,25 @@ mod tests {
         assert_eq!(u.id_text(), "VID 090C (Silicon Motion, chip maker) PID 1000, release 11.00");
         let u = UsbInfo { vid: "ABCD".into(), pid: "1234".into(), db_vendor: "LogiLink".into(), db_product: "UDisk flash drive".into(), ..Default::default() };
         assert_eq!(u.id_text(), "VID ABCD (LogiLink) PID 1234 (UDisk flash drive)");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_files_never_replace_files_or_follow_links() {
+        let d = std::env::temp_dir().join(format!("ft-new-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        write_new_file(&d.join("a/r.json"), b"1").unwrap();
+        assert!(write_new_file(&d.join("a/r.json"), b"2").is_err());
+        std::os::unix::fs::symlink(d.join("a/r.json"), d.join("a/link.json")).unwrap();
+        assert!(write_new_file(&d.join("a/link.json"), b"3").is_err());
+        assert_eq!(std::fs::read(d.join("a/r.json")).unwrap(), b"1");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_dir_is_private() {
+        let m = std::fs::symlink_metadata(manifest_dir().unwrap()).unwrap();
+        assert!(m.is_dir() && m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o077 == 0);
     }
 }

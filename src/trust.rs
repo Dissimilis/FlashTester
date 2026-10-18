@@ -196,7 +196,7 @@ pub fn run_plug_pull(w: &Where, checkpoint: u64, ctx: &Ctx) -> Report {
         disk_id: disk.as_ref().map(|d| d.id.clone()),
         claimed: vol.size,
     };
-    save_manifest(&m, Some(&dir));
+    let _ = save_manifest(&m, Some(&dir));
     let free = crate::platform::free_space(root).unwrap_or(0) / MIB * MIB;
     if free < checkpoint.max(64 * MIB) {
         rep.set(Status::Refused, format!("Only {} free: the pull-the-plug test needs at least {}.", size(free), size(checkpoint.max(64 * MIB))));

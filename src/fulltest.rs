@@ -108,13 +108,9 @@ pub fn data_dir(root: &Path) -> PathBuf {
     root.join(DATA_DIR)
 }
 
-fn local_manifest_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("FlashTester").join("manifests")
-}
-
-/// Save on the drive (file mode) and in %LOCALAPPDATA%, in case the drive loses it.
-pub fn save_manifest(m: &Manifest, dir: Option<&Path>) {
+/// Save on the drive (file mode) and in platform::manifest_dir(), in case the drive loses
+/// it. Err: the local copy could not be kept.
+pub fn save_manifest(m: &Manifest, dir: Option<&Path>) -> io::Result<()> {
     let json = serde_json::to_string_pretty(m).unwrap();
     if let Some(d) = dir {
         if crate::dev::no_link(d).and_then(|_| crate::dev::no_link(&d.join(MANIFEST))).is_ok() {
@@ -125,14 +121,19 @@ pub fn save_manifest(m: &Manifest, dir: Option<&Path>) {
         Pattern::Seeded { tag } => tag,
         Pattern::H2testw => 0,
     };
-    let ld = local_manifest_dir();
-    let _ = std::fs::create_dir_all(&ld);
-    let _ = std::fs::write(ld.join(format!("{tag:016x}.json")), &json);
+    std::fs::write(crate::platform::manifest_dir()?.join(format!("{tag:016x}.json")), &json)
+}
+
+/// The first save of a test's manifest: say so if no local copy could be kept.
+fn first_manifest(m: &Manifest, dir: Option<&Path>, ctx: &Ctx) {
+    if let Err(e) = save_manifest(m, dir) {
+        ctx.log(format!("No local copy of the test record ({e}). \"Check saved test data\" may not find this test."));
+    }
 }
 
 /// The newest local manifest matching a volume or disk.
 pub fn find_local_manifest(pred: impl Fn(&Manifest) -> bool) -> Option<Manifest> {
-    let mut v: Vec<Manifest> = std::fs::read_dir(local_manifest_dir())
+    let mut v: Vec<Manifest> = std::fs::read_dir(crate::platform::manifest_dir().ok()?)
         .ok()?
         .flatten()
         .filter_map(|e| serde_json::from_slice::<Manifest>(&std::fs::read(e.path()).ok()?).ok())
@@ -200,11 +201,11 @@ fn prepare(w: &Where, o: &TestOpts, pat: Pattern, ctx: &Ctx) -> io::Result<(Box<
                 disk_id: disk.as_ref().map(|d| d.id.clone()),
                 claimed: vol.size,
             };
-            save_manifest(&m, Some(&dir));
+            first_manifest(&m, Some(&dir), ctx);
             let free = crate::platform::free_space(root)?;
             let len = o.size.unwrap_or(u64::MAX).min(free) / MIB * MIB;
             m.bytes = len;
-            save_manifest(&m, Some(&dir));
+            let _ = save_manifest(&m, Some(&dir));
             Ok((open_dev(w, len, true)?, len))
         }
         Where::Disk(d) => {
@@ -223,7 +224,7 @@ fn prepare(w: &Where, o: &TestOpts, pat: Pattern, ctx: &Ctx) -> io::Result<(Box<
                 disk_id: Some(d.id.clone()),
                 claimed: d.size,
             };
-            save_manifest(&m, None);
+            first_manifest(&m, None, ctx);
             Ok((dev, len))
         }
     }
@@ -238,7 +239,7 @@ fn finish_manifest(w: &Where, pat: Pattern, end: u64, complete: bool) {
             Where::Dir { root, .. } => Some(data_dir(root)),
             _ => None,
         };
-        save_manifest(&m, dir.as_deref());
+        let _ = save_manifest(&m, dir.as_deref());
     }
 }
 

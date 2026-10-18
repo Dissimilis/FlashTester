@@ -431,12 +431,16 @@ fn run(cmd: &str, args: &[&str], input: Option<&str>) -> Result<String, String> 
     Ok(text)
 }
 
-/// The desktop user behind a root GUI started through pkexec or sudo: uid, gid, home.
+/// The desktop user behind a root GUI started through pkexec, sudo or doas: uid, gid, home.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn invoking_user() -> Option<(u32, u32, PathBuf)> {
-    let uid = std::env::var("PKEXEC_UID").or_else(|_| std::env::var("SUDO_UID")).ok()?;
+    // pkexec and sudo pass the caller's uid, doas only its name.
+    let (field, id) = match std::env::var("PKEXEC_UID").or_else(|_| std::env::var("SUDO_UID")) {
+        Ok(uid) => (2, uid),
+        Err(_) => (0, std::env::var("DOAS_USER").ok()?),
+    };
     let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-    passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).find(|f| f.len() >= 6 && f[2] == uid).and_then(|f| Some((f[2].parse().ok()?, f[3].parse().ok()?, PathBuf::from(f[5]))))
+    passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).find(|f| f.len() >= 6 && f[field] == id).and_then(|f| Some((f[2].parse().ok()?, f[3].parse().ok()?, PathBuf::from(f[5]))))
 }
 
 /// Where the GUI saves reports: ~/Documents/FlashTester (or ~/FlashTester), in the
@@ -469,20 +473,26 @@ pub fn open_file(p: &Path) -> io::Result<()> {
 
 /// Start this exe's GUI as root through pkexec (polkit asks for the password). The
 /// root copy connects to the caller's X display with the caller's X cookie; pkexec
-/// clears the environment, so both go in as arguments. The caller must stay alive
-/// until pkexec exits: pkexec refuses to serve a dead parent.
+/// clears the environment, so both go in as arguments (sudo and doas reset them too,
+/// so the fallback hint spells them out). The caller must stay alive until pkexec
+/// exits: pkexec refuses to serve a dead parent.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn relaunch_root() -> Result<std::process::Child, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let display = std::env::var("DISPLAY").map_err(|_| "DISPLAY is not set.".to_string())?;
-    let mut c = Command::new("pkexec");
-    c.arg(&exe).args(["gui", "--display", &display]);
+    let mut args = vec![exe.into_os_string(), "gui".into(), "--display".into(), display.into()];
+    // Absolute: pkexec runs the root copy from root's home.
     let xauth = std::env::var_os("XAUTHORITY").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".Xauthority")));
-    if let Some(x) = xauth.filter(|x| x.is_file()) {
-        c.arg("--xauthority").arg(x);
+    if let Some(x) = xauth.filter(|x| x.is_file()).and_then(|x| std::path::absolute(x).ok()) {
+        args.extend(["--xauthority".into(), x.into_os_string()]);
     }
-    c.spawn().map_err(|e| {
-        let hint = format!("Start FlashTester as root instead: sudo {} (or doas {})", exe.display(), exe.display());
+    Command::new("pkexec").args(&args).spawn().map_err(|e| {
+        let quote = |a: &std::ffi::OsString| {
+            let a = a.to_string_lossy();
+            if a.chars().all(|c| c.is_ascii_alphanumeric() || "/._:-".contains(c)) { a.into_owned() } else { format!("'{}'", a.replace('\'', r"'\''")) }
+        };
+        let cmd = args.iter().map(quote).collect::<Vec<_>>().join(" ");
+        let hint = format!("Start FlashTester as root instead: sudo {cmd} (or doas {cmd})");
         if e.kind() == io::ErrorKind::NotFound { format!("pkexec is not installed. {hint}") } else { format!("Cannot run pkexec ({e}). {hint}") }
     })
 }

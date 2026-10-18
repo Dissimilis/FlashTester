@@ -45,7 +45,7 @@ One executable per platform, with no installer. Windows uses system DLLs; Linux 
 | Windows 10 / 11, 64-bit | `flashtester.exe` | GUI and command line |
 | Linux x86_64, any distribution | `flashtester-linux-x86_64` | GUI (X11 or XWayland) and command line |
 | Linux aarch64 (64-bit ARM: Raspberry Pi with a 64-bit OS, ARM boards, routers) | `flashtester-linux-aarch64` | GUI (X11 or XWayland) and command line |
-| FreeBSD 13.5 to 16.0, amd64 | `flashtester-freebsd-x86_64` | command line |
+| FreeBSD 13.5 to 16.0, amd64 | `flashtester-freebsd-x86_64` | GUI (X11) and command line |
 | Haiku x86_64, experimental | `flashtester-haiku-x86_64` | command line |
 
 ### Windows
@@ -65,7 +65,7 @@ sudo ./flashtester-linux-x86_64 probe --disk sdb --destroy
 ```
 
 - Volumes go by mount point, whole disks by kernel name (`--disk sdb`, `--disk nvme1n1`, `--disk mmcblk1`).
-- Raw-mode tests and the free-space probe need root, and raw writes need the disk unmounted. In the GUI, "Restart as root" goes through `pkexec`.
+- Raw-mode tests and the free-space probe need root, and raw writes need the disk unmounted. In the GUI, "Restart as root" goes through `pkexec`; without it, the GUI shows the `sudo` or `doas` command to run instead.
 - `fix` uses `sfdisk` and `mkfs.*` (`--fs exfat`, `fat32`, `ntfs` or `ext4`).
 - The free-space probe needs a file system with `fallocate` and `FIEMAP`, such as ext4 or xfs.
 
@@ -78,9 +78,11 @@ sudo ./flashtester-linux-x86_64 probe --disk sdb --destroy
 
 ### FreeBSD
 
-- Command line only. Built against FreeBSD 14.5; runs on 13.5 to 16.0.
+- GUI inside an X11 desktop, and command line. Built against FreeBSD 14.5; runs on 13.5 to 16.0.
 - Volumes go by mount point (UFS, FAT and ZFS), whole disks by device name (`--disk da0`, `--disk ada1`, `--disk nda0`).
 - Raw-mode tests need root. FreeBSD refuses raw writes while anything on the disk is mounted, used as swap, or held by ZFS or another GEOM layer (mirror, geli).
+- In the GUI, "Restart as root" goes through `pkexec` from `sysutils/polkit`; without it, the GUI shows the `sudo` or `doas` command to run instead.
+- Without root, `usbconfig` hides USB details: a USB stick is listed as a SCSI disk with no USB ID or link speed.
 - `fix` uses `gpart` with `newfs_msdos` (`--fs fat32`, the default) or `newfs` (`--fs ufs`); the base system has no exFAT or NTFS formatter.
 - No free-space probe: FreeBSD cannot report where a file's blocks are on the disk. Use the raw probe on an empty drive, or a full test.
 
@@ -206,7 +208,7 @@ Cheap fakes ignore the high address bits, so writes past the real capacity wrap 
 - **Linux on hardware:** Debian 13 (OpenMediaVault) and Fedora 44 on x86_64; Armbian on ODROID C2 and N2+, Ubuntu 26.04 on AWS Graviton4 and OpenWrt 23.05 on a GL.iNet Flint 3e router, all aarch64.
 - **Linux in QEMU/KVM** with a real USB stick passed through, installed or booted live from a USB stick: AlmaLinux 10, Alpine 3.24, Arch, Bazzite, Chimera, Debian (on RAID, LUKS and LVM), EndeavourOS, Gentoo, Guix System 1.5, Kali 2026.2, Linux Mint 22, Manjaro, NixOS 26.05, OpenWrt (x86), openSUSE Tumbleweed, Rocky Linux 10, Slackware, SystemRescue, Tiny Core 17, Ubuntu 22.04 and 26.04, Void (glibc and musl) and Zorin OS 18. Kernels 5.15 to 7.2.
 - **Docker:** works with `docker run --privileged -v /dev:/dev`. Without the host's `/dev`, FlashTester can't tell which disks the host uses and refuses all of them.
-- **FreeBSD** in QEMU/KVM: 13.5, 14.4, 14.5, 15.0, 15.1 and 16.0-CURRENT.
+- **FreeBSD** in QEMU/KVM: 13.5, 14.4, 14.5, 15.0, 15.1 and 16.0-CURRENT. The GUI on 14.4 to 16.0-CURRENT under Xvfb, and on 14.5 with the openbox window manager and through `pkexec` and `doas`.
 - Fake drives (wraparound, dropped writes, read-only) are covered by unit tests on a simulated drive.
 
 ## Building

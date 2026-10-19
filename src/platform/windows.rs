@@ -588,6 +588,7 @@ impl Drop for RawDisk {
 }
 
 impl Dev for RawDisk {
+    fn sector_size(&self) -> usize { self.sector as usize }
     fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
         self.wrote |= self.writable;
         Ok(Box::new(crate::dev::IoHandle { file: crate::dev::io_handle(&self.file, self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))

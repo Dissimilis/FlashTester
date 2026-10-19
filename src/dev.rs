@@ -197,6 +197,8 @@ pub trait Dev: Send {
     fn discard(&mut self, _off: u64, _len: u64) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "discard unavailable"))
     }
+    /// Smallest addressable sector (buffers may require stricter alignment).
+    fn sector_size(&self) -> usize { self.align() }
     /// Granularity reads and writes must be aligned to.
     fn align(&self) -> usize {
         ALIGN
@@ -373,6 +375,7 @@ impl MemDev {
 }
 
 impl Dev for MemDev {
+    fn sector_size(&self) -> usize { 512 }
     fn len(&self) -> u64 {
         self.claimed
     }
@@ -432,6 +435,7 @@ impl CacheDev {
 
 #[cfg(test)]
 impl Dev for CacheDev {
+    fn sector_size(&self) -> usize { 512 }
     fn len(&self) -> u64 { self.state.lock().unwrap().disk.len() }
     fn fork(&mut self) -> io::Result<Box<dyn Dev>> { Ok(Box::new(self.clone())) }
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {

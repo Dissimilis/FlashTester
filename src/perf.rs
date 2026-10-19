@@ -46,57 +46,82 @@ fn run_one(open: &(dyn Fn(bool) -> io::Result<File> + Sync), span: u64, write: b
     if span < IO as u64 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "IOPS needs at least 4 KiB"));
     }
-    let started = Instant::now();
-    let deadline = started.checked_add(duration).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "IOPS duration is too large"))?;
-    let blocks = span / IO as u64;
-    let results: Vec<io::Result<Vec<f32>>> = std::thread::scope(|s| {
-        let hs: Vec<_> = (0..qd)
-            .map(|_| {
-                s.spawn(move || -> io::Result<Vec<f32>> {
-                    let f = open(write)?;
-                    let mut buf = AlignedBuf::new(IO);
-                    Pattern::Seeded { tag: new_tag() }.fill(0, &mut buf);
-                    let mut x = new_tag();
-                    let mut lat = vec![];
-                    while Instant::now() < deadline && !ctx.cancelled() {
-                        x = crate::pattern::xorshift(x);
-                        let off = (x % blocks) * IO as u64;
-                        let t = Instant::now();
-                        if write {
-                            if pwrite(&f, &buf, off)? != IO {
-                                return Err(io::Error::new(io::ErrorKind::WriteZero, "short IOPS write"));
-                            }
-                        } else {
-                            if pread(&f, &mut buf, off)? != IO {
-                                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short IOPS read"));
-                            }
-                        }
-                        lat.push(t.elapsed().as_secs_f32() * 1000.0);
-                    }
-                    Ok(lat)
-                })
-            })
-            .collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    let elapsed = started.elapsed().as_secs_f64();
-    let mut lat = vec![];
-    for r in results {
-        lat.extend(r?);
+    let mut handles: Vec<Box<dyn crate::dev::Dev>> = vec![];
+    for _ in 0..qd {
+        handles.push(Box::new(crate::dev::IoHandle { file: open(write)?, size: span, alignment: IO, writable: write }));
     }
-    lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = lat.len().max(1);
-    let pct = |p: f64| lat.get(((n as f64 * p) as usize).min(n - 1)).copied().unwrap_or(0.0) as f64;
-    let iops = lat.len() as f64 / elapsed.max(1e-9);
-    Ok(IopsRow {
-        kind: if write { "write" } else { "read" }.into(),
-        qd,
-        iops,
-        mb_s: iops * IO as f64 / 1e6,
-        p50_ms: pct(0.5),
-        p99_ms: pct(0.99),
-        max_ms: lat.last().copied().unwrap_or(0.0) as f64,
-    })
+    let clock = crate::engine::Clock::default();
+    let result = random_io(handles, RandomOpts { start: 0, span, write, pattern: None, deadline: clock.now() + duration.as_secs_f64() }, &clock, ctx);
+    if let Some(e) = result.error { return Err(e); }
+    Ok(result.row)
+}
+
+/// Shared random-I/O worker loop. Diagnostics verifies tagged reads and keeps
+/// stalls, while the standalone benchmark only needs the timing row.
+pub(crate) struct RandomOpts {
+    pub start: u64,
+    pub span: u64,
+    pub write: bool,
+    pub pattern: Option<Pattern>,
+    pub deadline: f64,
+}
+
+pub(crate) struct RandomResult {
+    pub row: IopsRow,
+    pub stalls: Vec<crate::engine::Completion>,
+    pub tally: crate::engine::Tally,
+    pub error: Option<io::Error>,
+    pub latencies: Vec<f32>,
+    pub operations: u64,
+}
+
+pub(crate) fn random_io(handles: Vec<Box<dyn crate::dev::Dev>>, o: RandomOpts, clock: &crate::engine::Clock, ctx: &Ctx) -> RandomResult {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let started = clock.now();
+    let stop = AtomicBool::new(false);
+    let qd = handles.len() as u32;
+    let results = std::thread::scope(|scope| {
+        let mut workers = vec![];
+        for mut dev in handles {
+            let (o, stop) = (&o, &stop);
+            workers.push(scope.spawn(move || {
+                let (mut lat, mut stalls, mut count, mut tally, mut error) = (vec![], vec![], 0u64, crate::engine::Tally::default(), None);
+                let mut buf = AlignedBuf::new(IO);
+                let pat = o.pattern.unwrap_or(Pattern::Seeded { tag: new_tag() });
+                let mut x = new_tag();
+                let mut worst = 0f64;
+                while clock.now() < o.deadline && !ctx.cancelled() && !stop.load(Ordering::SeqCst) {
+                    x = crate::pattern::xorshift(x);
+                    let off = o.start + (x % (o.span / IO as u64)) * IO as u64;
+                    let t = clock.now();
+                    let result = if o.write { pat.fill(off, &mut buf); dev.write_at(off, &buf) }
+                    else { dev.read_at(off, &mut buf).and_then(|n| if n == IO { Ok(()) } else { Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short random read")) }) };
+                    let at = clock.now();
+                    let elapsed = at - t;
+                    let gap = clock.complete(t, at);
+                    worst = worst.max(elapsed * 1000.);
+                    if elapsed >= 2. { stalls.push(crate::engine::Completion { off, len: IO, seconds: elapsed, at, gap }); }
+                    if let Err(e) = result { error = Some(e); }
+                    else if !o.write && o.pattern.is_some() && !tally.check(pat, off, &buf) { error = Some(io::Error::new(io::ErrorKind::InvalidData, format!("Random read returned wrong data at {off}"))); }
+                    else if gap >= 10. { error = Some(io::Error::other(format!("No I/O completed for {gap:.1} s; a blocked call overran the limit."))); }
+                    if error.is_some() { stop.store(true, Ordering::SeqCst); break; }
+                    count += 1;
+                    // A bounded reservoir keeps high-IOPS runs from consuming all RAM.
+                    if lat.len() < 32768 { lat.push((elapsed * 1000.) as f32); }
+                    else { let slot = crate::pattern::xorshift(x ^ count) % count; if slot < lat.len() as u64 { lat[slot as usize] = (elapsed * 1000.) as f32; } }
+                }
+                (lat, stalls, count, tally, error, worst)
+            }));
+        }
+        workers.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+    });
+    let (mut lat, mut stalls, mut count, mut tally, mut error, mut worst) = (vec![], vec![], 0, crate::engine::Tally::default(), None, 0f64);
+    for (l, s, n, t, e, w) in results { lat.extend(l); stalls.extend(s); count += n; tally.merge(&t); if error.is_none() { error = e; } worst = worst.max(w); }
+    lat.sort_by(f32::total_cmp);
+    let pct = |p: f64| lat.get(((lat.len() as f64 * p) as usize).min(lat.len().saturating_sub(1))).copied().unwrap_or(0.) as f64;
+    let iops = count as f64 / (clock.now() - started).max(1e-9);
+    let row = IopsRow { kind: if o.write { "write" } else { "read" }.into(), qd, iops, mb_s: iops * IO as f64 / 1e6, p50_ms: pct(0.5), p99_ms: pct(0.99), max_ms: worst };
+    RandomResult { row, stalls, tally, error, latencies: lat, operations: count }
 }
 
 /// Random 4K reads (and writes if `write`) at QD1 and QD32, `secs` per run.

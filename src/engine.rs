@@ -14,12 +14,13 @@ use std::time::Instant;
 #[derive(Clone)]
 pub struct Clock {
     start: Instant,
+    completed: std::sync::Arc<std::sync::Mutex<f64>>,
     #[cfg(test)]
     pub ticks: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Default for Clock {
-    fn default() -> Self { Self { start: Instant::now(), #[cfg(test)] ticks: None } }
+    fn default() -> Self { Self { start: Instant::now(), completed: Default::default(), #[cfg(test)] ticks: None } }
 }
 
 impl Clock {
@@ -28,13 +29,19 @@ impl Clock {
         if let Some(t) = &self.ticks { return t.load(std::sync::atomic::Ordering::SeqCst) as f64 / 1e9; }
         self.start.elapsed().as_secs_f64()
     }
+    pub fn complete(&self, start: f64, at: f64) -> f64 {
+        let mut last = self.completed.lock().unwrap();
+        let gap = at - last.max(start);
+        *last = last.max(at);
+        gap
+    }
     pub fn sleep(&self, secs: f64) {
         #[cfg(test)]
         if let Some(t) = &self.ticks { t.fetch_add((secs * 1e9).ceil().max(1.0) as u64, std::sync::atomic::Ordering::SeqCst); return; }
         std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0)));
     }
     #[cfg(test)]
-    pub fn simulated() -> Self { Self { start: Instant::now(), ticks: Some(Default::default()) } }
+    pub fn simulated() -> Self { Self { start: Instant::now(), completed: Default::default(), ticks: Some(Default::default()) } }
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +50,7 @@ pub struct Completion {
     pub len: usize,
     pub seconds: f64,
     pub at: f64,
+    pub gap: f64,
 }
 
 /// A bounded sequential window, with independent handles and at most `qd` writes
@@ -59,8 +67,8 @@ pub fn write_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block
             pat.fill(off, &mut buf[..n]);
             let t = clock.now();
             result = dev.write_at(off, &buf[..n]);
-            completed.push(Completion { off, len: if result.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now() });
-            if result.is_err() || clock.now() - t >= 10.0 { break; }
+            completed.push(Completion { off, len: if result.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now(), gap: clock.complete(t, clock.now()) });
+            if result.is_err() || completed.last().unwrap().gap >= 10.0 { break; }
             off += n as u64;
         }
         return (completed, result);
@@ -80,7 +88,7 @@ pub fn write_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block
                     pat.fill(off, &mut buf[..n]);
                     let t = clock.now();
                     let r = handle.write_at(off, &buf[..n]);
-                    let c = Completion { off, len: if r.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now() };
+                    let c = Completion { off, len: if r.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now(), gap: clock.complete(t, clock.now()) };
                     if tx.send((id, c, r)).is_err() { break; }
                 }
             });
@@ -96,12 +104,10 @@ pub fn write_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block
             pending += 1;
         }
         let mut stalled = false;
-        let mut last_completion = clock.now();
         while pending > 0 {
             let (id, c, r) = rx.recv().unwrap();
             pending -= 1;
-            stalled |= c.at - last_completion >= 10.0;
-            last_completion = last_completion.max(c.at);
+            stalled |= c.gap >= 10.0;
             completed.push(c);
             if result.is_ok() { result = r; }
             if result.is_ok() && !stalled && next < end && clock.now() < deadline && !ctx.cancelled() {

@@ -698,6 +698,16 @@ impl RawDisk {
 }
 
 impl Dev for RawDisk {
+    fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
+        Ok(Box::new(crate::dev::IoHandle { file: crate::dev::io_handle(&self.file, self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
+    }
+    fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
+        super::discard_range(self.writable, self.size, self.sector, off, len)?;
+        let range = [off, len];
+        // DIOCGDELETE: _IOW('d', 136, off_t[2])
+        if unsafe { libc::ioctl(self.file.as_raw_fd(), 0x8010_6488u64 as _, range.as_ptr()) } != 0 { return Err(super::discard_error(io::Error::last_os_error())); }
+        Ok(())
+    }
     fn len(&self) -> u64 {
         self.size
     }

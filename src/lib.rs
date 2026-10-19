@@ -3,6 +3,7 @@ pub mod backup;
 pub mod cli;
 pub mod ctx;
 pub mod dev;
+pub mod diagnose;
 pub mod engine;
 pub mod fix;
 pub mod flash;

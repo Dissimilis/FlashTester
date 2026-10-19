@@ -8,6 +8,16 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::fs::File;
 use std::io;
+
+/// Validate before any discard ioctl, including on a handle opened read-only.
+fn discard_range(writable: bool, size: u64, sector: u32, off: u64, len: u64) -> io::Result<()> {
+    if !writable { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only")); }
+    let sector = u64::from(sector.max(512));
+    if len == 0 || !off.is_multiple_of(sector) || !len.is_multiple_of(sector) || off > size || len > size - off || size > i64::MAX as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "discard range is unaligned or outside the disk"));
+    }
+    Ok(())
+}
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -588,4 +598,26 @@ mod tests {
         let m = std::fs::symlink_metadata(manifest_dir().unwrap()).unwrap();
         assert!(m.is_dir() && m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o077 == 0);
     }
+}
+
+#[cfg(test)]
+mod discard_tests {
+    use super::*;
+    #[test]
+    fn discard_refuses_read_only_and_invalid_ranges() {
+        assert_eq!(discard_range(false, 8192, 512, 0, 8192).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        for (off, len) in [(0, 0), (1, 512), (0, 513), (8192, 512), (u64::MAX, 512)] {
+            assert!(discard_range(true, 8192, 512, off, len).is_err());
+        }
+        assert!(discard_range(true, 8192, 512, 0, 8192).is_ok());
+        assert!(discard_range(true, 8192, 4096, 512, 4096).is_err());
+    }
+}
+
+fn discard_error(e: io::Error) -> io::Error {
+    #[cfg(windows)]
+    let unsupported = matches!(e.raw_os_error(), Some(1 | 50));
+    #[cfg(unix)]
+    let unsupported = matches!(e.raw_os_error(), Some(libc::EOPNOTSUPP | libc::ENOTTY));
+    if unsupported { io::Error::new(io::ErrorKind::Unsupported, e) } else { e }
 }

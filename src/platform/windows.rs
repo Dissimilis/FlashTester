@@ -588,6 +588,23 @@ impl Drop for RawDisk {
 }
 
 impl Dev for RawDisk {
+    fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
+        self.wrote |= self.writable;
+        Ok(Box::new(crate::dev::IoHandle { file: crate::dev::io_handle(&self.file, self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
+    }
+    fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
+        super::discard_range(self.writable, self.size, self.sector, off, len)?;
+        self.wrote = true;
+        // DSM header is 28 bytes; its 16-byte range starts on an 8-byte boundary.
+        let mut input = [0u8; 48];
+        input[0..4].copy_from_slice(&28u32.to_le_bytes());
+        input[4..8].copy_from_slice(&1u32.to_le_bytes()); // DeviceDsmAction_Trim
+        input[20..24].copy_from_slice(&32u32.to_le_bytes());
+        input[24..28].copy_from_slice(&16u32.to_le_bytes());
+        input[32..40].copy_from_slice(&off.to_le_bytes());
+        input[40..48].copy_from_slice(&len.to_le_bytes());
+        ioctl(&self.file, 0x002D_9404, &input, &mut []).map(|_| ()).map_err(super::discard_error)
+    }
     fn len(&self) -> u64 {
         self.size
     }
@@ -645,6 +662,8 @@ mod read_only_tests {
         let mut raw = RawDisk { file, size: 4096, sector: 512, id: "fixture".into(), writable: false, _locks: vec![], wrote: false };
         let error = raw.write_at(0, &[42; 512]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!raw.wrote);
+        assert_eq!(raw.discard(0, 4096).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert!(!raw.wrote);
         raw.flush().unwrap();
         let mut data = [1; 512];

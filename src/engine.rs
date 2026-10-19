@@ -10,6 +10,113 @@ use std::collections::HashSet;
 use std::sync::mpsc::sync_channel;
 use std::time::Instant;
 
+/// One monotonic clock for I/O timing, phase deadlines and simulated idle time.
+#[derive(Clone)]
+pub struct Clock {
+    start: Instant,
+    #[cfg(test)]
+    pub ticks: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+}
+
+impl Default for Clock {
+    fn default() -> Self { Self { start: Instant::now(), #[cfg(test)] ticks: None } }
+}
+
+impl Clock {
+    pub fn now(&self) -> f64 {
+        #[cfg(test)]
+        if let Some(t) = &self.ticks { return t.load(std::sync::atomic::Ordering::SeqCst) as f64 / 1e9; }
+        self.start.elapsed().as_secs_f64()
+    }
+    pub fn sleep(&self, secs: f64) {
+        #[cfg(test)]
+        if let Some(t) = &self.ticks { t.fetch_add((secs * 1e9).ceil().max(1.0) as u64, std::sync::atomic::Ordering::SeqCst); return; }
+        std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0)));
+    }
+    #[cfg(test)]
+    pub fn simulated() -> Self { Self { start: Instant::now(), ticks: Some(Default::default()) } }
+}
+
+#[derive(Clone, Debug)]
+pub struct Completion {
+    pub off: u64,
+    pub len: usize,
+    pub seconds: f64,
+    pub at: f64,
+}
+
+/// A bounded sequential window, with independent handles and at most `qd` writes
+/// outstanding. Drain before returning so read pauses and wrap checks are real fences.
+#[allow(clippy::too_many_arguments)]
+pub fn write_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block: usize, qd: usize, deadline: f64, clock: &Clock, ctx: &Ctx) -> (Vec<Completion>, std::io::Result<()>) {
+    let mut completed = vec![];
+    let mut result = Ok(());
+    if qd == 1 {
+        let mut buf = AlignedBuf::new(block);
+        let mut off = start;
+        while off < end && clock.now() < deadline && !ctx.cancelled() {
+            let n = (end - off).min(block as u64) as usize;
+            pat.fill(off, &mut buf[..n]);
+            let t = clock.now();
+            result = dev.write_at(off, &buf[..n]);
+            completed.push(Completion { off, len: if result.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now() });
+            if result.is_err() || clock.now() - t >= 10.0 { break; }
+            off += n as u64;
+        }
+        return (completed, result);
+    }
+    let handles: std::io::Result<Vec<_>> = (0..qd).map(|_| dev.fork()).collect();
+    let handles = match handles { Ok(h) => h, Err(e) => return (completed, Err(e)) };
+    std::thread::scope(|scope| {
+        let (tx, rx) = sync_channel(qd);
+        let mut queues = vec![];
+        for (id, mut handle) in handles.into_iter().enumerate() {
+            let (work, jobs) = sync_channel::<(u64, usize)>(1);
+            queues.push(work);
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let mut buf = AlignedBuf::new(block);
+                while let Ok((off, n)) = jobs.recv() {
+                    pat.fill(off, &mut buf[..n]);
+                    let t = clock.now();
+                    let r = handle.write_at(off, &buf[..n]);
+                    let c = Completion { off, len: if r.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now() };
+                    if tx.send((id, c, r)).is_err() { break; }
+                }
+            });
+        }
+        drop(tx);
+        let mut next = start;
+        let mut pending = 0;
+        for q in &queues {
+            if next >= end || clock.now() >= deadline || ctx.cancelled() { break; }
+            let n = (end - next).min(block as u64) as usize;
+            q.send((next, n)).unwrap();
+            next += n as u64;
+            pending += 1;
+        }
+        let mut stalled = false;
+        let mut last_completion = clock.now();
+        while pending > 0 {
+            let (id, c, r) = rx.recv().unwrap();
+            pending -= 1;
+            stalled |= c.at - last_completion >= 10.0;
+            last_completion = last_completion.max(c.at);
+            completed.push(c);
+            if result.is_ok() { result = r; }
+            if result.is_ok() && !stalled && next < end && clock.now() < deadline && !ctx.cancelled() {
+                let n = (end - next).min(block as u64) as usize;
+                queues[id].send((next, n)).unwrap();
+                next += n as u64;
+                pending += 1;
+            }
+        }
+        drop(queues);
+    });
+    completed.sort_by_key(|c| c.off);
+    (completed, result)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MapPoint {
     /// Start of the region, bytes.

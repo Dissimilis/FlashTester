@@ -59,6 +59,8 @@ pub struct ProbeResult {
     pub module: Option<u64>,
     pub finding: Finding,
     pub seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u64>,
     pub examples: Vec<String>,
 }
 
@@ -128,8 +130,9 @@ enum Got {
 }
 
 /// Write the given positions in order with a fresh tag, flush, read them all back.
-fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx, label: &str) -> io::Result<Vec<Got>> {
-    let pat = Pattern::Seeded { tag: new_tag() };
+#[allow(clippy::too_many_arguments)]
+fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx, label: &str, tag: u64, strict: bool) -> io::Result<Vec<Got>> {
+    let pat = Pattern::Seeded { tag };
     let mut buf = AlignedBuf::new(block);
     let mut got = vec![Got::Ok; pos.len()];
     ctx.phase(&format!("{label}: writing"), order.len() as u64);
@@ -139,7 +142,7 @@ fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx
         }
         pat.fill(pos[i], &mut buf);
         if let Err(e) = dev.write_at(pos[i], &buf) {
-            if is_disconnect(&e) {
+            if strict || is_disconnect(&e) || e.kind() == io::ErrorKind::TimedOut {
                 return Err(e);
             }
             got[i] = Got::IoErr;
@@ -156,7 +159,7 @@ fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx
             continue;
         }
         got[i] = match dev.read_at(pos[i], &mut buf) {
-            Err(e) if is_disconnect(&e) => return Err(e),
+            Err(e) if strict || is_disconnect(&e) || e.kind() == io::ErrorKind::TimedOut => return Err(e),
             Err(_) => Got::IoErr,
             Ok(r) if r < block => Got::IoErr,
             Ok(_) => classify_block(pat, pos[i], &buf),
@@ -199,7 +202,7 @@ fn status_char(pos: u64, a: Got, b: Got) -> char {
 /// Time a few scattered writes; on drives with very slow random writes, keep
 /// every k-th grid position (k a power of two, so the grid stays a power-of-two
 /// grid) to finish both passes in about `budget_s` seconds.
-fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usize, budget_s: f64, ctx: &Ctx) -> io::Result<(Vec<u64>, u64)> {
+fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usize, budget_s: f64, strict: bool, ctx: &Ctx) -> io::Result<(Vec<u64>, u64)> {
     if positions.len() <= 64 {
         return Ok((positions, step));
     }
@@ -212,7 +215,9 @@ fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usiz
         let pos = positions[n * (2 * i + 1) / (2 * samples)];
         let t = Instant::now();
         // A fake may error past its real end: that is for the passes to classify.
-        if dev.write_at(pos, &buf).is_ok() && dev.read_at(pos, &mut buf).is_ok() {
+        let pair = dev.write_at(pos, &buf).and_then(|_| dev.read_at(pos, &mut buf));
+        if strict && let Err(e) = pair { return Err(e); }
+        if pair.is_ok() {
             times.push(t.elapsed().as_secs_f64());
         }
     }
@@ -239,18 +244,30 @@ fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usiz
 }
 
 pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode: &str, ctx: &Ctx) -> io::Result<ProbeResult> {
+    run_inner(dev, positions, step, claimed, mode, None, ctx)
+}
+
+/// Diagnostics supplies a deadline-enforcing Dev; established fakes need no refinement.
+pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: f64, ctx: &Ctx) -> io::Result<ProbeResult> {
+    let claimed = dev.len();
+    run_inner(dev, positions, step, claimed, "raw", Some(budget_s), ctx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode: &str, budget: Option<f64>, ctx: &Ctx) -> io::Result<ProbeResult> {
     let t0 = Instant::now();
     if positions.is_empty() {
         return Err(io::Error::other("no probe positions (device or free space too small)"));
     }
     let block = BLOCK.max(dev.align());
-    let (positions, step) = thin_for_speed(dev, positions, step, block, 300.0, ctx)?;
+    let (positions, step) = thin_for_speed(dev, positions, step, block, budget.unwrap_or(300.0), budget.is_some(), ctx)?;
     let asc: Vec<usize> = (0..positions.len()).collect();
     let desc: Vec<usize> = asc.iter().rev().copied().collect();
-    let a = pass(dev, &positions, &asc, block, ctx, "Probe pass 1/2")?;
-    let b = pass(dev, &positions, &desc, block, ctx, "Probe pass 2/2")?;
+    let a = pass(dev, &positions, &asc, block, ctx, "Probe pass 1/2", new_tag(), budget.is_some())?;
+    let tag = new_tag();
+    let b = pass(dev, &positions, &desc, block, ctx, "Probe pass 2/2", tag, budget.is_some())?;
 
-    let mut r = ProbeResult { mode: mode.into(), claimed, step, block: block as u64, ..Default::default() };
+    let mut r = ProbeResult { mode: mode.into(), claimed, step, block: block as u64, tag: Some(tag), ..Default::default() };
     r.status = a.iter().zip(&b).enumerate().map(|(i, (&x, &y))| status_char(positions[i], x, y)).collect();
     for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
         for g in [x, y] {
@@ -267,12 +284,12 @@ pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode
     }
     // A wrap shorter than the grid step makes every grid point land on the same spot,
     // so the smallest visible distance is the step itself: look again, finer, below it.
-    while let Some(m) = r.module.filter(|&m| m <= step.max(r.step) && m > MIB) {
+    while let Some(m) = r.module.filter(|&m| budget.is_none() && m <= step.max(r.step) && m > MIB) {
         let (fine_step, fine) = grid(2 * m, block as u64, 1024);
         let asc: Vec<usize> = (0..fine.len()).collect();
         let desc: Vec<usize> = asc.iter().rev().copied().collect();
-        let fa = pass(dev, &fine, &asc, block, ctx, "Probe: narrowing the wraparound")?;
-        let fb = pass(dev, &fine, &desc, block, ctx, "Probe: narrowing the wraparound")?;
+        let fa = pass(dev, &fine, &asc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false)?;
+        let fb = pass(dev, &fine, &desc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false)?;
         let smaller = fa.iter().chain(&fb).zip(fine.iter().chain(&fine)).filter_map(|(g, &p)| if let Got::Alias(src) = g { Some(src.abs_diff(p)) } else { None }).filter(|&d| d > 0 && d < m).min();
         match smaller {
             Some(d) => {
@@ -301,7 +318,7 @@ pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode
             r.usable = m;
         } else if tail_bad && fb > 0 {
             r.finding = Finding::Fake;
-            r.usable = refine(dev, positions[fb - 1], positions[fb], block, ctx)?;
+            r.usable = if budget.is_some() { positions[fb] } else { refine(dev, positions[fb - 1], positions[fb], block, ctx)? };
         } else {
             r.finding = Finding::Defective;
             r.usable = positions[fb];
@@ -325,7 +342,7 @@ fn refine(dev: &mut dyn Dev, mut lo: u64, mut hi: u64, block: usize, ctx: &Ctx) 
         }
         let asc: Vec<usize> = (0..pts.len()).collect();
         let desc: Vec<usize> = asc.iter().rev().copied().collect();
-        let g = pass(dev, &pts, &desc, block, ctx, &format!("Refining boundary {round}/4"))?;
+        let g = pass(dev, &pts, &desc, block, ctx, &format!("Refining boundary {round}/4"), new_tag(), false)?;
         match g.iter().position(|&x| x != Got::Ok) {
             Some(0) => hi = pts[0],
             Some(i) => {

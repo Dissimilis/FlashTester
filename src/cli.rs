@@ -166,6 +166,17 @@ enum Cmd {
         #[arg(long)]
         destroy: bool,
     },
+    /// Destructive whole-disk diagnostics: sampled capacity, cache, speed and stalls.
+    Diagnose {
+        #[arg(long)]
+        disk: String,
+        /// Confirm erasing all files and partitions, including whole-disk discard.
+        #[arg(long)]
+        destroy: bool,
+        /// Overall limit: seconds, or a number followed by s, m or h (e.g. 15m).
+        #[arg(long, value_parser = parse_duration)]
+        max_time: Option<f64>,
+    },
     /// Read-only surface scan of a whole disk: bad and slow regions.
     Scan {
         #[arg(long)]
@@ -554,6 +565,19 @@ fn emit(rep: &Report, cli: &Cli) -> i32 {
     if save_failed { 3 } else { rep.exit_code() }
 }
 
+fn parse_duration(s: &str) -> Result<f64, String> {
+    let s = s.trim();
+    let (number, scale) = match s.as_bytes().last() {
+        Some(b's') => (&s[..s.len()-1], 1.),
+        Some(b'm') => (&s[..s.len()-1], 60.),
+        Some(b'h') => (&s[..s.len()-1], 3600.),
+        _ => (s, 1.),
+    };
+    let seconds = number.parse::<f64>().map_err(|_| "Use seconds or a duration such as 90s, 10m or 0.5h.".to_string())? * scale;
+    crate::diagnose::check_time(seconds)?;
+    Ok(seconds)
+}
+
 fn need_destroy(destroy: bool, w: &Where) -> Result<(), String> {
     if let Where::Disk(d) = w
         && !destroy {
@@ -594,6 +618,13 @@ fn build_job(cmd: &Cmd) -> Result<Job, String> {
             let w = target(t)?;
             need_destroy(*destroy, &w)?;
             Job::Probe { w }
+        }
+        Cmd::Diagnose { disk, destroy, max_time } => {
+            if !destroy { return Err("Quick diagnostics erases the whole disk. Add --destroy to confirm.".into()); }
+            let w = app::resolve_disk(disk)?;
+            need_destroy(*destroy, &w)?;
+            let Where::Disk(disk) = w else { unreachable!() };
+            Job::Diagnose { disk, max_time: *max_time }
         }
         Cmd::Scan { disk, size } => Job::Scan { w: app::resolve_read_disk(disk)?, size: size.as_deref().map(parse_size).transpose()? },
         Cmd::Iops { t, seconds, write, destroy } => {
@@ -782,6 +813,23 @@ mod tests {
         assert!(Cli::try_parse_from(["ft", "decode-flash", "reply.bin", "--nand-layout", "phison", "--smi-model"]).is_err());
         assert!(Cli::try_parse_from(["ft", "decode-flash", "reply.bin", "--nand-layout", "smi-new"]).is_ok());
         assert!(Cli::try_parse_from(["ft", "decode-flash", "reply.bin", "--device-info", "disk.json", "--smi-model"]).is_err());
+    }
+
+    #[test]
+    fn diagnostics_arguments_require_a_disk_and_positive_duration() {
+        use super::*;
+        for args in [vec!["ft", "diagnose"], vec!["ft", "diagnose", "E:"], vec!["ft", "diagnose", "--disk", "test", "--max-time", "NaN"]] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli = Cli::try_parse_from(["ft", "diagnose", "--disk", "simulated", "--destroy", "--max-time", "1.5m", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(cli.cmd, Cmd::Diagnose { destroy: true, max_time: Some(90.), .. }));
+        let unconfirmed = Cli::try_parse_from(["ft", "diagnose", "--disk", "simulated"]).unwrap();
+        assert!(build_job(&unconfirmed.cmd).err().unwrap().contains("--destroy"));
+        for invalid in ["0", "-1s", "inf", "NaN", "1e300h", "1ms", ""] { assert!(parse_duration(invalid).is_err()); }
+        assert_eq!(parse_duration("0.5h").unwrap(), 1800.);
+        assert_eq!(parse_duration("90s").unwrap(), 90.);
+        assert_eq!(parse_duration("120").unwrap(), 120.);
     }
 
     #[test]

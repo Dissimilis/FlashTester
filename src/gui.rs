@@ -32,6 +32,7 @@ enum Kind {
     Endurance,
     Verify,
     Probe,
+    Diagnose,
     Scan,
     Iops,
     SmallFiles,
@@ -108,6 +109,27 @@ mod operation_tests {
     }
 
     #[test]
+    fn diagnostics_is_raw_only_and_requires_the_confirmed_identity() {
+        use super::*;
+        assert!(Kind::for_target(true, false).contains(&Kind::Diagnose));
+        assert!(!Kind::for_target(false, false).contains(&Kind::Diagnose));
+        assert!(!Kind::for_target(true, true).contains(&Kind::Diagnose));
+        assert!(Kind::Diagnose.erases(true));
+        assert!(Kind::Diagnose.needs_admin(true));
+        let mut gui = Gui::new();
+        let disk = DiskInfo { id: "simulated".into(), instance_id: "original".into(), size: 4096, ..Default::default() };
+        gui.sel = Some(Sel::Disk(disk.id.clone()));
+        gui.disks = vec![disk.clone()];
+        let mut job = Job::Diagnose { disk, max_time: None };
+        assert!(job.destructive() && job.needs_admin() && !job.reads_disk_only());
+        assert!(!gui.confirmation_matches(&job));
+        gui.confirm = true;
+        assert!(gui.confirmation_matches(&job));
+        if let Job::Diagnose { disk, .. } = &mut job { disk.instance_id = "replacement".into(); }
+        assert!(!gui.confirmation_matches(&job));
+    }
+
+    #[test]
     fn disconnected_drive_keeps_its_completed_report() {
         use super::*;
         let mut gui = Gui::new();
@@ -134,6 +156,7 @@ impl Kind {
             Kind::Endurance => "Repeated write test",
             Kind::Verify => "Check saved test data",
             Kind::Probe => "Quick capacity check",
+            Kind::Diagnose => "Quick diagnostics",
             Kind::Scan => "Read scan",
             Kind::Iops => "Random 4 KiB speed",
             Kind::SmallFiles => "Small files",
@@ -151,6 +174,7 @@ impl Kind {
             Kind::Endurance => "Start repeated test",
             Kind::Verify => "Check test data",
             Kind::Probe => "Check capacity",
+            Kind::Diagnose => "Start diagnostics",
             Kind::Scan => "Start scan",
             Kind::Iops => "Start random I/O test",
             Kind::SmallFiles => "Start small file test",
@@ -164,7 +188,7 @@ impl Kind {
             Kind::Backup | Kind::Restore => "Backup and restore",
             Kind::Info => "Information",
             Kind::Scan => "Read checks",
-            Kind::Test | Kind::Probe | Kind::Verify => "Capacity and data loss",
+            Kind::Test | Kind::Probe | Kind::Verify | Kind::Diagnose => "Capacity and data loss",
             Kind::Bench | Kind::Iops => "Speed",
             Kind::Endurance | Kind::SmallFiles | Kind::PlugPull => "Reliability",
             Kind::Fix => "Formatting",
@@ -189,6 +213,7 @@ impl Kind {
                     "Check for false capacity using small blocks in free space. Needs root access. On a fake drive, writes can overwrite existing files."
                 }
             }
+            (Kind::Diagnose, _) => "Erase the whole disk, then check sampled capacity, write-cache behavior, speed, stalls and SMART. Usually 3 minutes on USB 2, 10 on USB/SD or SATA, 15 on NVMe. A full test is still needed to check every byte.",
             (Kind::Scan, _) => "Read every sector and mark unreadable or slow areas. Does not write to the disk.",
             (Kind::Iops, _) => "Measure random 4 KiB reads at queue depths 1 and 32. File mode also measures writes. Takes about 40 seconds.",
             (Kind::SmallFiles, _) => "Create, rename and delete small files, then check their names and contents. Reports errors and files per second.",
@@ -203,7 +228,7 @@ impl Kind {
         if protected {
             &[Kind::Info, Kind::Bench, Kind::Scan]
         } else if raw {
-            &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
+            &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Diagnose, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
         } else if cfg!(target_os = "freebsd") {
             // No free-space probe on FreeBSD: it cannot map a file to disk blocks.
             &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Test, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
@@ -212,7 +237,7 @@ impl Kind {
         }
     }
     fn erases(self, raw: bool) -> bool {
-        raw && matches!(self, Kind::Test | Kind::Endurance | Kind::Probe | Kind::Fix | Kind::Restore)
+        raw && matches!(self, Kind::Test | Kind::Endurance | Kind::Probe | Kind::Fix | Kind::Restore | Kind::Diagnose)
     }
     fn needs_admin(self, raw: bool) -> bool {
         self != Kind::Info && (raw || self == Kind::Probe)
@@ -434,6 +459,10 @@ impl Gui {
             Kind::Endurance => Job::Test { w, o: opts(self.passes) },
             Kind::Verify => Job::Verify { w, h2w: false, manifest: None, loops: 1 },
             Kind::Probe => Job::Probe { w },
+            Kind::Diagnose => {
+                let Where::Disk(disk) = w else { return Err("Quick diagnostics needs a whole disk.".into()); };
+                Job::Diagnose { disk, max_time: None }
+            }
             Kind::Scan => Job::Scan { w, size },
             Kind::Iops => Job::Iops { w, secs: 8.0, write: false },
             Kind::SmallFiles => Job::SmallFiles { w, count: self.count, keep: false },
@@ -1567,6 +1596,11 @@ impl Gui {
         };
         self.slim_bar(ui);
         let mut act = self.verdict(ui, &rep);
+        if let Some(d) = &rep.diagnostics {
+            Frame::new().fill(k::BAR).corner_radius(4).inner_margin(10).show(ui, |ui| {
+                for line in d.summary_lines() { ui.add(Label::new(k::text(line, 13.0, k::TEXT2)).wrap()); }
+            });
+        }
         let cells = gui_map::from_report(&rep);
         let capacity = rep.probe.as_ref().map(|p| (p.usable.min(p.claimed), p.claimed));
         if !matches!(self.kind, Kind::Backup | Kind::Restore) {

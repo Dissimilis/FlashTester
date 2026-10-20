@@ -382,7 +382,7 @@ fn iops(w: &Where, secs: f64, write: bool, ctx: &Ctx) -> Report {
             // Writing holds the volume locks for the duration.
             let raw = RawDisk::open(d, write)?;
             // Every worker stays on this checked device even if its name is reused.
-            let r = crate::perf::run_iops(&|wr| crate::dev::io_handle(&raw.file, wr), raw.size, write, secs, ctx);
+            let r = crate::perf::run_iops(&|wr| raw.worker(wr), raw.size, write, secs, ctx);
             drop(raw);
             r
         })(),

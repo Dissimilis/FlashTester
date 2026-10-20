@@ -593,6 +593,11 @@ pub struct RawDisk {
 }
 
 impl RawDisk {
+    /// A second handle for a worker thread, on the descriptor this one already holds.
+    pub fn worker(&self, write: bool) -> io::Result<File> {
+        crate::dev::io_handle(&self.file, write)
+    }
+
     pub fn open_restore(d: &DiskInfo) -> io::Result<RawDisk> { Self::open(d, true) }
 
     pub fn open_backup(d: &DiskInfo) -> io::Result<RawDisk> {
@@ -643,7 +648,7 @@ impl Dev for RawDisk {
     fn sector_size(&self) -> usize { self.sector as usize }
     fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
         self.wrote |= self.writable;
-        Ok(Box::new(crate::dev::IoHandle { file: crate::dev::io_handle(&self.file, self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
+        Ok(Box::new(crate::dev::IoHandle { file: self.worker(self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
     }
     fn discard_max_bytes(&self) -> Option<u64> { read(format!("/sys/block/{}/queue/discard_max_bytes", self.id)).parse().ok() }
     fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {

@@ -588,6 +588,34 @@ impl RawDisk {
         }
         Ok(RawDisk { file: f, size: u64::from_le_bytes(len), sector: d.sector_size.max(512), id: d.id.clone(), writable: write, _locks: locks, wrote: false })
     }
+
+    /// A second handle for a worker thread. ReOpenFile rejects disk handles (error 87),
+    /// so open the path again and check that it reaches the device this handle holds.
+    pub fn worker(&self, write: bool) -> io::Result<File> {
+        if write && !self.writable {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
+        }
+        let f = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .share_mode(3)
+            .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH)
+            .open(format!("\\\\.\\PhysicalDrive{}", self.id))?;
+        let identity = |f: &File| -> io::Result<(Vec<u8>, Vec<u8>, u64)> {
+            let mut num = vec![0u8; 12];
+            ioctl(f, IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut num)?;
+            let mut desc = vec![0u8; 1024]; // StorageDeviceProperty: vendor, product, serial
+            let n = ioctl(f, IOCTL_STORAGE_QUERY_PROPERTY, &[0u8; 12], &mut desc)?;
+            desc.truncate(n);
+            let mut len = [0u8; 8];
+            ioctl(f, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut len)?;
+            Ok((num, desc, u64::from_le_bytes(len)))
+        };
+        if identity(&f)? != identity(&self.file)? {
+            return Err(io::Error::other("the disk changed while the test was running"));
+        }
+        Ok(f)
+    }
 }
 
 fn lock_volume(v: &VolumeInfo) -> io::Result<File> {
@@ -622,7 +650,7 @@ impl Dev for RawDisk {
     fn sector_size(&self) -> usize { self.sector as usize }
     fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
         self.wrote |= self.writable;
-        Ok(Box::new(crate::dev::IoHandle { file: crate::dev::io_handle(&self.file, self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
+        Ok(Box::new(crate::dev::IoHandle { file: self.worker(self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
     }
     fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
         super::discard_range(self.writable, self.size, self.sector, off, len)?;

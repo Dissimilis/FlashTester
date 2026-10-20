@@ -154,6 +154,9 @@ pub struct Report {
     /// Offline NAND lookup or imported controller response, never evidence of usable capacity.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub flash: Option<crate::flash::Identification>,
+    /// The drive's serial numbers were removed before the report was saved.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub serials_hidden: bool,
 }
 
 pub fn tool_name() -> String {
@@ -188,6 +191,52 @@ impl Report {
             }
             if d.vendor.is_empty() && d.product.is_empty() {
                 self.warnings.push("The drive reports no vendor or product name.".into());
+            }
+        }
+    }
+
+    /// Remove the drive's serial numbers before the report is shared: the disk, USB and card
+    /// serials, the device id (a Windows USB device id holds the serial) and their copies in messages.
+    pub fn hide_serials(&mut self) {
+        self.serials_hidden = true;
+        let flash = self.flash.as_mut();
+        let mut disks: Vec<&mut DiskInfo> = self.target.disk.iter_mut().chain(flash.and_then(|f| f.comparison_identity.as_mut())).collect();
+        let mut secrets = vec![];
+        for d in &mut disks {
+            secrets.push(std::mem::take(&mut d.serial));
+            secrets.push(std::mem::take(&mut d.instance_id));
+            secrets.extend(d.usb.as_mut().and_then(|u| u.serial.take()));
+            secrets.extend(d.card.as_mut().map(|c| std::mem::take(&mut c.serial)));
+        }
+        let mut secrets: Vec<String> = secrets.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        // Longest first: a USB device id contains the serial, and must go as a whole.
+        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        let scrub = |t: &mut String| {
+            for s in &secrets {
+                if s.len() >= 6 {
+                    *t = t.replace(s.as_str(), "hidden");
+                } else {
+                    // A short value could match ordinary text: replace it only where it stands as a value.
+                    *t = t.replace(&format!("({s})"), "(hidden)").replace(&format!("'{s}'"), "'hidden'");
+                    if let Some(head) = t.strip_suffix(&format!(": {s}")) {
+                        *t = format!("{head}: hidden");
+                    }
+                }
+            }
+        };
+        for d in disks {
+            d.placeholder_serial.iter_mut().for_each(&scrub);
+        }
+        if let Some(f) = &mut self.flash {
+            // A captured controller response can hold the serial as raw bytes.
+            f.raw_response.clear();
+            f.diagnostics.iter_mut().for_each(&scrub);
+        }
+        self.warnings.iter_mut().chain(&mut self.notes).chain(&mut self.verdict.details).chain([&mut self.verdict.headline]).for_each(&scrub);
+        // "Serial changed from 'A' to 'B'": the new serial is not in the report to match.
+        for c in &mut self.identity_changes {
+            if c.starts_with("Serial changed") || c.starts_with("USB serial changed") {
+                c.truncate(c.find(" from ").unwrap_or(c.len()));
             }
         }
     }
@@ -393,7 +442,21 @@ fn speed_svg(series: &[(&str, &str, &IoStats)]) -> String {
         let v = maxy * (1.0 - i as f64 / 4.0);
         let _ = write!(s, r#"<line x1="{pad}" x2="{}" y1="{y}" y2="{y}" class="grid"/><text x="2" y="{}" class="lbl">{v:.0}</text>"#, w - 10.0, y + 4.0);
     }
-    let _ = write!(s, r#"<text x="{}" y="{}" class="lbl">{}</text><text x="{pad}" y="{}" class="lbl">0</text>"#, w - 70.0, h - 4.0, size(maxx as u64), h - 4.0);
+    // Position ticks at a round step in GB (10^9 bytes), about five of them.
+    let gb = maxx / 1e9;
+    let mag = 10f64.powf((gb / 5.0).log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0].iter().map(|m| m * mag).find(|s| s * 5.0 >= gb).unwrap_or(10.0 * mag);
+    let decimals = (-step.log10().floor()).max(0.0) as usize;
+    let bottom = h - pad;
+    let ticks = if series.iter().any(|s| s.2.speed_map.len() > 1) { (gb / step + 1e-9) as u64 + 1 } else { 0 };
+    for i in 0..ticks {
+        let v = i as f64 * step;
+        let x = pad + (w - pad - 10.0) * v / gb;
+        // A label at the right edge would be cut off when centred.
+        let anchor = if x > w - 25.0 { "end" } else { "middle" };
+        let _ = write!(s, r#"<line x1="{x:.1}" x2="{x:.1}" y1="{}" y2="{bottom}" class="grid"/><text x="{x:.1}" y="{}" class="lbl" text-anchor="{anchor}">{v:.decimals$}</text>"#, pad / 2.0, bottom + 15.0);
+    }
+    let _ = write!(s, r#"<text x="{}" y="{}" class="lbl" text-anchor="middle">position (GB)</text>"#, pad + (w - pad - 10.0) / 2.0, h - 4.0);
     for (name, color, st) in series {
         let pts: Vec<String> = st
             .speed_map
@@ -432,7 +495,7 @@ fn status_class(s: Status) -> &'static str {
     }
 }
 
-fn identity_rows(t: &Target) -> String {
+fn identity_rows(t: &Target, serials_hidden: bool) -> String {
     let mut s = String::new();
     let mut row = |k: &str, v: String| {
         if !v.is_empty() {
@@ -444,12 +507,14 @@ fn identity_rows(t: &Target) -> String {
         row("Disk", format!("{} {} ({})", d.id, d.name(), d.path));
         let none = |x: &str| if x.is_empty() { "(none)".to_string() } else { x.to_string() };
         row("Vendor / product / revision", format!("{} / {} / {}", none(&d.vendor), none(&d.product), none(&d.revision)));
-        row("Serial", d.serial.clone());
+        row("Serial", if serials_hidden { "Serial numbers are hidden in this report.".into() } else { d.serial.clone() });
         row("Claimed capacity", format!("{} ({} bytes)", size(d.size), d.size));
         row("Bus", format!("{}{}", d.bus, if d.removable { ", removable" } else { "" }));
         if let Some(u) = &d.usb {
             row("USB ID", format!("{}, USB {}", u.id_text(), u.usb_version));
-            row("USB serial", u.serial.clone().unwrap_or_else(|| "(none)".into()));
+            if !serials_hidden {
+                row("USB serial", u.serial.clone().unwrap_or_else(|| "(none)".into()));
+            }
             row("Link", u.link.clone());
             row("USB device", u.device_text());
         }
@@ -457,9 +522,11 @@ fn identity_rows(t: &Target) -> String {
             row("Controller", d.controller.clone());
         }
         if let Some(c) = &d.card {
-            row("Card", format!("{}, serial {}", c.text(), c.serial));
+            row("Card", if serials_hidden { c.text() } else { format!("{}, serial {}", c.text(), c.serial) });
         }
         row(if cfg!(windows) { "Windows device" } else { "Device" }, d.instance_id.clone());
+    } else if serials_hidden {
+        row("Serial", "Serial numbers are hidden in this report.".into());
     }
     if let Some(v) = &t.volume {
         row("File system", format!("{} \"{}\", {} ({} free)", v.fs, v.label, size(v.size), size(v.free)));
@@ -489,7 +556,7 @@ impl Report {
             }
             b.push_str("</ul>");
         }
-        let _ = write!(b, "<h2>Drive</h2><table>{}</table>", identity_rows(&self.target));
+        let _ = write!(b, "<h2>Drive</h2><table>{}</table>", identity_rows(&self.target, self.serials_hidden));
         if let Some(p) = &self.probe {
             b.push_str("<h2>Capacity probe</h2><ul>");
             for l in p.summary_lines() {
@@ -639,7 +706,7 @@ impl Report {
         let operation_label = if identification_only || transfer { "Operation" } else { "Test" };
         let _ = write!(b, "<tr><th>{operation_label}</th><td>{}</td></tr><tr><th>Started / finished</th><td>{} / {}</td></tr><tr><th>Tool</th><td>{}</td></tr></table></div>", esc(&operation), esc(&self.started), esc(&self.finished), esc(&self.tool));
         let identity_label = if identification_only { "Input" } else { "Drive identity" };
-        let _ = write!(b, "<h2>{identity_label}</h2><table>{}</table>", identity_rows(&self.target));
+        let _ = write!(b, "<h2>{identity_label}</h2><table>{}</table>", identity_rows(&self.target, self.serials_hidden));
         b.push_str("<h2>Evidence</h2><ul>");
         for d in &self.verdict.details {
             let _ = write!(b, "<li>{}</li>", esc(d));

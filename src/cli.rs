@@ -24,6 +24,9 @@ struct Cli {
     /// Save a one-page HTML summary of the evidence.
     #[arg(long, global = true, value_name = "FILE")]
     evidence: Option<PathBuf>,
+    /// Leave the drive's serial numbers out of the result: printed, --report, --evidence and render.
+    #[arg(long, global = true)]
+    hide_serial: bool,
     /// Hide progress output. Action prompts are still shown.
     #[arg(long, short, global = true)]
     quiet: bool,
@@ -532,6 +535,11 @@ fn emit(rep: &Report, cli: &Cli) -> i32 {
             std::fs::write(p, body)
         }
     };
+    let mut shared = rep.clone();
+    if cli.hide_serial {
+        shared.hide_serials();
+    }
+    let rep = &shared;
     if cli.json {
         println!("{}", serde_json::to_string_pretty(rep).unwrap());
     } else {
@@ -722,13 +730,16 @@ pub fn main() -> i32 {
             };
         }
         Cmd::Render { input, html, evidence_out } => {
-            let rep: Report = match std::fs::read(input).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string())) {
+            let mut rep: Report = match std::fs::read(input).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string())) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("{}: {e}", input.display());
                     return 3;
                 }
             };
+            if cli.hide_serial {
+                rep.hide_serials();
+            }
             if let Some(h) = html {
                 let _ = std::fs::write(h, rep.html());
             }

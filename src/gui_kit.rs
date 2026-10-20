@@ -176,6 +176,7 @@ pub enum Icon {
     Alert,
     Unplug,
     Check,
+    ChevronLeft,
     ChevronRight,
     ChevronDown,
     Download,
@@ -289,6 +290,9 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Check => {
             p.add(Shape::line(pts(&[(20.0, 6.0), (9.0, 17.0), (4.0, 12.0)]), Stroke::new((2.0 * s).max(1.2), color)));
+        }
+        Icon::ChevronLeft => {
+            line(&[(15.0, 18.0), (9.0, 12.0), (15.0, 6.0)]);
         }
         Icon::ChevronRight => {
             line(&[(9.0, 18.0), (15.0, 12.0), (9.0, 6.0)]);

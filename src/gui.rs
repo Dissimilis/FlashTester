@@ -266,7 +266,6 @@ impl SmartView {
 /// What a click in the result view asks for.
 enum Act {
     Save(bool),
-    Again,
     Rerun(Kind),
     Fix(String),
     ChooseDrive,
@@ -295,6 +294,7 @@ pub struct Gui {
     log: Vec<String>,
     log_open: bool,
     summary_open: bool,
+    hide_serial: bool,
     error: Option<String>,
     admin: bool,
     styled: bool,
@@ -330,7 +330,8 @@ impl Gui {
             saved: vec![],
             log: vec![],
             log_open: false,
-            summary_open: false,
+            summary_open: true,
+            hide_serial: false,
             error: None,
             admin: platform::is_admin(),
             styled: false,
@@ -509,7 +510,7 @@ impl Gui {
         self.smart = None;
         self.live = Live::default();
         self.log_open = false;
-        self.summary_open = false;
+        self.summary_open = true;
         self.confirm = false;
         self.running = Some(Running { ctx, handle, shown: 0, phases: vec![], prompt_since: None });
     }
@@ -559,7 +560,11 @@ impl Gui {
     }
 
     fn save(&mut self, evidence: bool) {
-        let Some(rep) = &self.result else { return };
+        let Some(mut rep) = self.result.clone() else { return };
+        if self.hide_serial {
+            rep.hide_serials();
+        }
+        let rep = &rep;
         let dir = platform::reports_dir();
         // Milliseconds: report files are never overwritten, and both buttons write a JSON.
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
@@ -793,6 +798,19 @@ impl Gui {
     }
 
     // ---- main area ----
+
+    /// Back to the selected drive's operation list, as clicking the drive does.
+    fn back_bar(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.running.is_none() && self.sel.is_some();
+        if k::button(ui, Look::Secondary, Some(Icon::ChevronLeft), "Back to menu", 28.0, 12.0, enabled).clicked()
+            && let Some(s) = self.sel.clone()
+        {
+            self.select(s);
+            // The drive may have gone while its report was shown.
+            self.reconcile_selection();
+        }
+        ui.add_space(4.0);
+    }
 
     fn main_view(&mut self, ui: &mut egui::Ui) {
         if self.running.is_some() {
@@ -1080,7 +1098,10 @@ impl Gui {
                 ui.ctx().copy_text(format!("{}\n\n{}\n\n{}", rep.verdict.headline, rep.verdict.details.join("\n"), rep.notes.join("\n")));
             }
             if k::button(ui, Look::Plain, None, "Save report", 28.0, 12.0, true).clicked() {
-                let rep = app::identification_report(&d);
+                let mut rep = app::identification_report(&d);
+                if self.hide_serial {
+                    rep.hide_serials();
+                }
                 let dir = platform::reports_dir();
                 let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
                 let html = dir.join(format!("drive-info-{stamp}.html"));
@@ -1090,6 +1111,10 @@ impl Gui {
                     Err(e) => self.error = Some(format!("Cannot save report: {e}")),
                 }
             }
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            k::checkbox(ui, &mut self.hide_serial, 16.0, k::TEXT3, k::ACCENT, k::text("Hide serial numbers in saved reports", 12.0, k::TEXT2), None);
         });
         self.saved_reports(ui);
         ui.add_space(10.0);
@@ -1584,6 +1609,13 @@ impl Gui {
                 if k::button(ui, Look::Secondary, Some(Icon::FileText), summary_label, 32.0, 13.0, true).clicked() {
                     act = Some(Act::Save(true));
                 }
+                if rep.target.disk.is_some() {
+                    // The checkbox lays out from the top: centre it on the 32 px buttons.
+                    ui.vertical(|ui| {
+                        ui.add_space(7.0);
+                        k::checkbox(ui, &mut self.hide_serial, 16.0, k::TEXT3, k::ACCENT, k::text("Hide serial numbers", 13.0, k::TEXT2), None);
+                    });
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let r = ui
                         .horizontal(|ui| {
@@ -1615,7 +1647,6 @@ impl Gui {
 
         match act {
             Some(Act::Save(evidence)) => self.save(evidence),
-            Some(Act::Again) => self.result = None,
             Some(Act::Rerun(kd)) => {
                 self.kind = kd;
                 self.confirm = false;
@@ -1641,11 +1672,6 @@ impl Gui {
             Status::Unreliable | Status::Cancelled => (k::WARN, k::WARN_INK, k::WARN_TINT, k::WARN_STROKE),
             Status::Info => (k::ACCENT, k::DONE_INK, k::SEL, k::LINE),
             _ => (k::DANGER, k::DANGER_INK, k::DANGER_TINT, k::DANGER_STROKE),
-        };
-        let target = match &self.sel {
-            Some(Sel::Volume(m)) => vol_key(m),
-            Some(Sel::Disk(id)) => format!("disk {id}"),
-            None => String::new(),
         };
         let disk = rep.target.disk.as_ref().map(|d| d.id.clone()).or_else(|| self.sel_disk().map(|d| d.id.clone()));
         let mut act = None;
@@ -1686,20 +1712,11 @@ impl Gui {
                             }
                             Status::Defective | Status::ReadOnly => {
                                 b(evidence, "Save evidence sheet", Act::Save(true));
-                                if self.protected() || rep.read_only {
-                                    b(Look::Outline(stroke), "Run another read check", Act::Again);
-                                } else {
+                                if !self.protected() && !rep.read_only {
                                     b(Look::Outline(k::DANGER_STROKE), "Run full test again", Act::Rerun(Kind::Test));
                                 }
                             }
-                            Status::Ok => {
-                                b(Look::Outline(stroke), &format!("Run another test on {target}"), Act::Again);
-                                b(Look::Plain, "Choose another drive", Act::ChooseDrive);
-                            }
-                            _ => {
-                                b(Look::Outline(stroke), "Choose another operation", Act::Again);
-                                b(Look::Plain, "Choose another drive", Act::ChooseDrive);
-                            }
+                            _ => b(Look::Plain, "Choose another drive", Act::ChooseDrive),
                         }
                     });
                 });
@@ -2009,7 +2026,9 @@ impl Gui {
         }
         egui::Panel::top("top").exact_size(44.0).resizable(false).frame(Frame::new().fill(k::BAR).inner_margin(Margin::symmetric(16, 0))).show(ui, |ui| self.top_bar(ui));
         egui::Panel::left("drives").exact_size(300.0).resizable(false).frame(Frame::new().fill(k::PANEL)).show(ui, |ui| self.sidebar(ui));
-        egui::CentralPanel::default().frame(Frame::new().fill(k::WINDOW).inner_margin(Margin::symmetric(24, 20))).show(ui, |ui| {
+        // A small top margin centres the back button on the drive list's Refresh button.
+        egui::CentralPanel::default().frame(Frame::new().fill(k::WINDOW).inner_margin(Margin { left: 24, right: 24, top: 8, bottom: 20 })).show(ui, |ui| {
+            self.back_bar(ui);
             egui::ScrollArea::vertical().id_salt("main").auto_shrink(false).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 16.0;
                 self.main_view(ui);

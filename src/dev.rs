@@ -194,6 +194,8 @@ pub trait Dev: Send {
     fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "independent handles unavailable"))
     }
+    /// Maximum discard request accepted by the OS, when known.
+    fn discard_max_bytes(&self) -> Option<u64> { None }
     fn discard(&mut self, _off: u64, _len: u64) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "discard unavailable"))
     }

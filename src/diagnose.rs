@@ -72,7 +72,7 @@ impl Limits {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Stall {
     pub phase: String,
-    pub offset: u64,
+    pub offset: Option<u64>,
     pub at: f64,
     pub seconds: f64,
     pub write: bool,
@@ -185,13 +185,15 @@ pub fn report(disk: &DiskInfo, d: Diagnostics) -> crate::report::Report {
     r.identity_changes = d.identity_changes.clone();
     if !d.iops.rows.is_empty() { r.iops = Some(d.iops.clone()); }
     r.tested = d.zones.iter().map(|z| z.verified).sum();
-    r.notes.push("Quick diagnostics samples the disk. A full write-and-verify test is needed to check every byte. Discard erases the whole disk even though subsequent writes cover at most half its capacity.".into());
+    r.notes.push("Quick diagnostics samples the disk. A full write-and-verify test is needed to check every byte. Discard may erase the whole disk even though subsequent writes cover at most half its capacity.".into());
     r.notes.push("Latency percentiles use bounded samples; worst latency and all stalls are retained. Zone read latency is a single 4K sample, not proof of weak flash.".into());
+    r.notes.push("Data I/O pauses of 10 s or more are warnings; 60 s without a completion stops the run. Slow successful discard requests do not indicate failure. Limits are checked between calls, so a blocked call can overrun a deadline.".into());
     r.diagnostics = Some(d);
     r
 }
 
 impl Diagnostics {
+    fn cache_caveat(&self) -> bool { !self.trim.starts_with("effective") && (self.drop_at.is_some() || !self.recovery.is_empty()) }
     pub fn summary_lines(&self) -> Vec<String> {
         use crate::report::{size, duration};
         let mut lines = vec![];
@@ -205,7 +207,7 @@ impl Diagnostics {
                 else if self.baseline_read_mb_s.is_some() { format!("Estimated fast stretch: {}. Reads stayed fast: the write cache is a likely cause, not proven.", size(pos)) }
                 else { "No pre-drop read baseline was available; the cause of the write slowdown is unconfirmed.".into() });
         } else { lines.push(format!("Sequential write: no drop in the first {}; {}.", size(self.written), if self.peak_mb_s > 0. { format!("stable peak {:.1} MB/s", self.peak_mb_s) } else { speed })); }
-        if !self.trim.starts_with("effective") { lines.push("All cache figures may be understated: the drive was not trimmed.".into()); }
+        if self.cache_caveat() { lines.push("All cache figures may be understated: the drive was not trimmed.".into()); }
         if self.drop_at.is_none() { lines.push("Cache recovery: not measured because no drop was seen.".into()); }
         else if self.heat_suspected { lines.push(if self.thermal_recovery { "Thermal recovery: read speed returned after idle; heat is a hypothesis, not proof." } else { "Thermal recovery: read speed did not recover within the available budget; no recovery writes were made." }.into()); }
         else if self.recovery.is_empty() { lines.push("Cache recovery: insufficient time or unused space within the write cap.".into()); }
@@ -275,12 +277,7 @@ impl DropWatch {
     }
 }
 
-#[derive(Debug)]
-struct Budget;
-impl std::fmt::Display for Budget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("phase budget reached") }
-}
-impl std::error::Error for Budget {}
+use crate::probe::Budget;
 
 struct Run<'a> {
     clock: Clock,
@@ -321,7 +318,7 @@ impl Run<'_> {
     fn record(&mut self, off: u64, n: usize, start: f64, write: bool) -> io::Result<()> {
         let elapsed = self.clock.now() - start;
         self.record_at(off, n, elapsed, self.clock.now(), write);
-        if self.clock.complete(start, self.clock.now()) >= 10.0 { return Err(io::Error::other(format!("No I/O completed for {elapsed:.1} s; a blocked call overran the limit."))); }
+        if self.clock.complete(start, self.clock.now()) >= 60.0 { return Err(io::Error::other(format!("No I/O completed for {elapsed:.1} s; a blocked call overran the limit."))); }
         Ok(())
     }
     fn record_at(&mut self, off: u64, n: usize, elapsed: f64, at: f64, write: bool) {
@@ -331,7 +328,7 @@ impl Run<'_> {
         p.worst_ms = p.worst_ms.max(elapsed * 1000.);
         if p.latency.len() < 65536 { p.latency.push(elapsed); }
         else { let slot = crate::pattern::xorshift(p.operations) % p.operations; if slot < p.latency.len() as u64 { p.latency[slot as usize] = elapsed; } }
-        if elapsed >= 2.0 { self.r.stalls.push(Stall { phase: p.name.clone(), offset: off, at, seconds: elapsed, write, write_path: false }); }
+        if elapsed >= 2.0 { self.r.stalls.push(Stall { phase: p.name.clone(), offset: (n > 0).then_some(off), at, seconds: elapsed, write, write_path: false }); }
     }
     fn read(&mut self, dev: &mut dyn Dev, off: u64, buf: &mut [u8]) -> io::Result<()> {
         self.ready()?;
@@ -385,20 +382,38 @@ impl Run<'_> {
         while self.clock.now() < end { self.ready()?; self.clock.sleep((end - self.clock.now()).min(0.1)); }
         Ok(())
     }
+    fn discard(&mut self, dev: &mut dyn Dev, off: u64, len: u64) -> io::Result<()> {
+        self.ready()?;
+        let t = self.clock.now();
+        let result = dev.discard(off, len);
+        self.record_at(0, 0, self.clock.now() - t, self.clock.now(), true);
+        // A slow successful discard is not evidence of failing media.
+        self.clock.complete(t, self.clock.now());
+        result
+    }
     fn trim(&mut self, dev: &mut dyn Dev) -> io::Result<()> {
         self.phase(1, "TRIM and idle");
-        self.r.trim = "not checked".into();
-        self.ready()?;
-        let command_end = self.end.min(self.clock.now() + 15.);
-        self.end = command_end;
-        let t = self.clock.now();
-        let result = dev.discard(0, dev.len() / dev.align() as u64 * dev.align() as u64);
-        self.record(0, 0, t, true)?;
-        if let Err(e) = result {
-            if crate::dev::is_disconnect(&e) || !matches!(e.kind(), io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput) { return Err(e); }
-            self.r.trim = format!("unsupported: {e}");
-            return Ok(());
+        let align = dev.sector_size() as u64;
+        let size = dev.len() / align * align;
+        let chunk = dev.discard_max_bytes().unwrap_or(8 * crate::dev::GIB).min(8 * crate::dev::GIB) / align * align;
+        if chunk == 0 { self.r.trim = "unsupported: OS discard limit is zero".into(); return Ok(()); }
+        self.ctx.phase("TRIM", size);
+        let mut off = 0;
+        self.r.trim = format!("partial: 0 of {size} bytes trimmed");
+        while off < size && self.clock.now() < self.end {
+            let n = chunk.min(size - off);
+            if let Err(e) = self.discard(dev, off, n) {
+                if e.kind() != io::ErrorKind::Unsupported { return Err(e); }
+                self.r.trim = format!("unsupported after {off} of {size} bytes: {e}");
+                return Ok(());
+            }
+            off += n;
+            self.ctx.progress(off);
+            self.r.trim = format!("partial: {off} of {size} bytes trimmed");
         }
+        if off < size { return Ok(()); }
+        self.r.trim = "whole disk trimmed; effectiveness check incomplete".into();
+        if self.clock.now() >= self.end { return Ok(()); }
         let n = (4 * MIB).min(self.limits.seq_cap) as usize;
         let mut buf = AlignedBuf::new(n);
         self.pat.fill(0, &mut buf[..n]);
@@ -406,17 +421,21 @@ impl Run<'_> {
         self.overhead += n as u64;
         self.flush(dev)?;
         self.verify(dev, self.pat, 0, n, false)?;
-        self.ready()?;
-        let t = self.clock.now();
-        let discarded = dev.discard(0, n as u64);
-        self.record(0, 0, t, true)?;
-        if let Err(e) = discarded { self.r.trim = format!("sample discard failed: {e}"); return Err(e); }
+        let mut off = 0;
+        while off < n as u64 {
+            let len = chunk.min(n as u64 - off);
+            if let Err(e) = self.discard(dev, off, len) {
+                self.r.trim = format!("sample discard failed: {e}");
+                if e.kind() == io::ErrorKind::Unsupported { return Ok(()); }
+                return Err(e);
+            }
+            off += len;
+        }
         self.read(dev, 0, &mut buf[..n])?;
         if buf[..n].as_chunks::<512>().0.iter().enumerate().any(|(i, b)| self.pat.buffer_ok(i as u64 * 512, b)) {
             self.r.trim = "probably not effective (tagged data remains; legal on some drives)".into();
         } else {
             self.r.trim = "effective in the sample".into();
-            self.end = self.limits.end(1, self.phase_start);
             self.idle(30.)?;
             self.snapshot()?;
         }
@@ -424,16 +443,19 @@ impl Run<'_> {
     }
     fn probe(&mut self, dev: &mut dyn Dev) -> io::Result<()> {
         self.phase(2, "Capacity probe");
-        let (step, mut points) = probe::grid(dev.len(), dev.align() as u64, 1024);
+        let (mut step, mut points) = probe::grid(dev.len(), dev.align() as u64, 1024);
         let max = (self.limits.write_cap.saturating_sub(self.overhead) / dev.align() as u64).min(1024) as usize;
         if max < 2 { return Err(io::Error::other("device too small for diagnostics")); }
-        if points.len() > max {
-            points = (0..max).map(|i| points[i * (points.len() - 1) / (max - 1)]).collect();
+        while points.len() > max {
+            let last = *points.last().unwrap();
+            step *= 2;
+            points.retain(|p| p.is_multiple_of(step) || *p == last);
         }
         self.overhead += points.len() as u64 * dev.align() as u64;
         let budget = (self.end - self.clock.now()).max(0.0);
         let ctx = self.ctx.clone();
-        let result = probe::run_limited(&mut Measured { dev, run: self }, points, step, budget, &ctx)?;
+        let clock = self.clock.clone();
+        let result = probe::run_limited(&mut Measured { dev, run: self }, points, step, budget, &clock, &ctx)?;
         self.r.status = match result.finding { Finding::Fake => Status::Fake, Finding::Defective => Status::Defective, Finding::ReadOnly => Status::ReadOnly, Finding::Genuine => Status::Info };
         self.r.probe = Some(result);
         Ok(())
@@ -478,7 +500,7 @@ impl Run<'_> {
                 }
             }
             result?;
-            if done.iter().any(|c| c.gap >= 10.) { return Err(io::Error::other("No I/O completed for 10 s; a blocked read overran the limit.")); }
+            if done.iter().any(|c| c.gap >= 60.) { return Err(io::Error::other("No I/O completed for 60 s; a blocked read overran the limit.")); }
             for c in done { self.replay_reads(dev, self.pat, c.off, c.len, c.at - c.seconds, c.seconds)?; }
         }
         Ok((bytes > 0).then(|| bytes as f64 / 1e6 / (self.clock.now() - start).max(1e-9)))
@@ -510,7 +532,7 @@ impl Run<'_> {
             }
             self.r.written = self.seq_end;
             result?;
-            if done.iter().any(|c| c.gap >= 10.) { return Err(io::Error::other("No I/O completed for 10 s; a blocked write overran the limit.")); }
+            if done.iter().any(|c| c.gap >= 60.) { return Err(io::Error::other("No I/O completed for 60 s; a blocked write overran the limit.")); }
             for c in &done { self.check_stall(dev, c.off, c.seconds)?; }
             if self.seq_end == off { break; }
             active += elapsed;
@@ -578,14 +600,15 @@ fn mixed_read(dev: &mut dyn Dev, pat: Pattern, rng: &mut u64, previous: &mut Opt
 pub fn interpret_stalls(stalls: &[Stall]) -> String {
     if stalls.len() < 3 { return if stalls.is_empty() { "No stalls of 2 s or longer." } else { "Too few stalls to attribute a cause." }.into(); }
     for s in stalls {
-        let same: Vec<_> = stalls.iter().filter(|x| x.offset / MIB == s.offset / MIB).collect();
+        let Some(off) = s.offset else { continue; };
+        let same: Vec<_> = stalls.iter().filter(|x| x.offset.is_some_and(|p| p / MIB == off / MIB)).collect();
         if same.len() >= 3 && same.iter().any(|x| x.phase != s.phase) {
-            return format!("Bad regions near {}: stalls repeated here across phases.", crate::report::size(s.offset / MIB * MIB));
+            return format!("Bad regions near {}: stalls repeated here across phases.", crate::report::size(off / MIB * MIB));
         }
     }
     let mut times: Vec<_> = stalls.iter().collect();
     times.sort_by(|a,b| a.at.total_cmp(&b.at));
-    if times.windows(3).any(|w| w[2].at - w[0].at <= 60. && w[0].seconds < w[1].seconds && w[1].seconds < w[2].seconds && w[0].offset / MIB != w[2].offset / MIB) {
+    if times.windows(3).any(|w| w[2].at - w[0].at <= 60. && w[0].seconds < w[1].seconds && w[1].seconds < w[2].seconds) {
         "Throttling or power problem: speed may degrade in long use.".into()
     } else { "Random hiccups, likely harmless; no repeatable region or worsening time pattern.".into() }
 }
@@ -656,7 +679,7 @@ impl Run<'_> {
         p.bytes += result.operations * 4096;
         p.latency.extend(result.latencies.iter().take(65536usize.saturating_sub(p.latency.len())).map(|ms| *ms as f64 / 1000.));
         self.r.tally.merge(&result.tally);
-        for c in &result.stalls { self.r.stalls.push(Stall { phase: p.name.clone(), offset: c.off, at: c.at, seconds: c.seconds, write, write_path: false }); }
+        for c in &result.stalls { self.r.stalls.push(Stall { phase: p.name.clone(), offset: Some(c.off), at: c.at, seconds: c.seconds, write, write_path: false }); }
         self.r.iops.rows.push(result.row.clone());
         if let Some(e) = result.error {
             if e.kind() == io::ErrorKind::InvalidData { self.r.status = if result.tally.aliased > 0 { Status::Fake } else { Status::Defective }; }
@@ -667,7 +690,7 @@ impl Run<'_> {
             if write {
                 let t = self.clock.now();
                 self.verify(dev, self.pat, c.off, 4096, false)?;
-                if let Some(s) = self.r.stalls.iter_mut().rev().find(|s| s.offset == c.off && s.write) { s.write_path = self.clock.now() - t < 0.1; }
+                if let Some(s) = self.r.stalls.iter_mut().rev().find(|s| s.offset == Some(c.off) && s.write) { s.write_path = self.clock.now() - t < 0.1; }
             }
         }
         if !result.stalls.is_empty() && !self.replayed && self.clock.now() < self.end {
@@ -784,7 +807,7 @@ impl Run<'_> {
                 loaded.worst_ms = loaded.worst_ms.max(elapsed * 1000.);
                 if result.is_err() { self.r.status = Status::Unreliable; }
                 result?;
-                if gap >= 10. { return Err(io::Error::other(format!("No I/O completed for {gap:.1} s during an overlapping read."))); }
+                if gap >= 60. { return Err(io::Error::other(format!("No I/O completed for {gap:.1} s during an overlapping read."))); }
             }
             loaded.finish();
             self.r.reads_freeze = loaded.p99_ms >= 100. && loaded.p99_ms >= idle.p50_ms.max(0.001) * 50.;
@@ -831,7 +854,7 @@ impl Run<'_> {
         let alignment = dev.sector_size();
         self.verify(dev, self.pat, off, alignment, false)?;
         let fast = self.clock.now() - start < 0.1;
-        if let Some(stall) = self.r.stalls.iter_mut().rev().find(|s| s.offset == off && s.write) { stall.write_path = fast; }
+        if let Some(stall) = self.r.stalls.iter_mut().rev().find(|s| s.offset == Some(off) && s.write) { stall.write_path = fast; }
         if !self.replayed && !self.r.phases.last().unwrap().name.starts_with("Mixed") {
             self.replayed = true;
             self.r.warnings.push(format!("{}: repeating up to the last 10 s of writes once after a stall.", self.r.phases.last().unwrap().name));
@@ -843,7 +866,7 @@ impl Run<'_> {
                 let (done, result) = engine::write_window(dev, self.pat, start, end, self.limits.block, self.r.class.qd(), until, &self.clock, self.ctx);
                 for c in &done { self.record_at(c.off, c.len, c.seconds, c.at, true); }
                 result?;
-                if done.iter().any(|c| c.gap >= 10.) { return Err(io::Error::other("No I/O completed for 10 s during stall replay.")); }
+                if done.iter().any(|c| c.gap >= 60.) { return Err(io::Error::other("No I/O completed for 60 s during stall replay.")); }
                 if done.is_empty() { break; }
             }
         }
@@ -877,7 +900,7 @@ impl Run<'_> {
                 let (done, result) = engine::write_window(dev, self.pat, off, cap, self.limits.block, self.r.class.qd(), (before + 0.2).min(until), &self.clock, self.ctx);
                 for c in &done { self.record_at(c.off, c.len, c.seconds, c.at, true); self.recovery.1 = self.recovery.1.max(c.off + c.len as u64); }
                 result?;
-                if done.iter().any(|c| c.gap >= 10.) { return Err(io::Error::other("No I/O completed for 10 s during recovery.")); }
+                if done.iter().any(|c| c.gap >= 60.) { return Err(io::Error::other("No I/O completed for 60 s during recovery.")); }
                 if self.recovery.1 == off { break; }
                 let elapsed = self.clock.now() - before;
                 for c in &done { self.check_stall(dev, c.off, c.seconds)?; }
@@ -900,10 +923,11 @@ impl Run<'_> {
         self.phase(6, "Final verification");
         self.flush(dev)?;
         if let Some(p) = self.r.probe.clone() {
-            let old = Pattern::Seeded { tag: p.tag.unwrap() };
-            for off in p.positions {
+            for (i, &off) in p.positions.iter().enumerate() {
+                let tag = if p.point_tags.is_empty() { p.tag } else { p.point_tags[i] };
+                let Some(tag) = tag else { continue; };
                 // Probe points touched by a later phase now carry the main run tag.
-                let pat = if off < self.seq_end || (self.mixed.0..self.mixed.1).contains(&off) || (self.recovery.0..self.recovery.1).contains(&off) { self.pat } else { old };
+                let pat = if off < self.seq_end || (self.mixed.0..self.mixed.1).contains(&off) || (self.recovery.0..self.recovery.1).contains(&off) { self.pat } else { Pattern::Seeded { tag } };
                 self.verify(dev, pat, off, p.block as usize, false)?;
             }
         }
@@ -1040,11 +1064,15 @@ fn finish_verdict(r: &mut Diagnostics) {
         Status::Unreliable => "Problems found: the drive or its connection reported errors.",
         _ => "Incomplete: the budget ended before all diagnostic checks finished.",
     }.into(); }
+    if let Some(p) = &r.probe && p.partial { r.warnings.push(p.partial_summary()); }
     if r.triage_failing { r.warnings.push("SMART was already reporting failure; only the probe and a small verified sample were run.".into()); }
     if r.reads_freeze { r.warnings.push("Bulk storage only: it freezes reads while writing.".into()); }
     if r.link_limited { r.warnings.push("The measured speed is at the USB 2 ceiling (about 35-40 MB/s); this port limits speed.".into()); }
     if r.peak_mb_s > 0. && r.peak_mb_s < 5. { r.warnings.push("Sequential writes are very slow.".into()); }
-    if !r.trim.starts_with("effective") { r.warnings.push("Cache figures may be understated: the drive was not trimmed.".into()); }
+    if r.cache_caveat() { r.warnings.push("Cache figures may be understated: the drive was not trimmed.".into()); }
+    if let Some(s) = r.stalls.iter().filter(|s| s.offset.is_some() && s.seconds >= 10.).max_by(|a,b| a.seconds.total_cmp(&b.seconds)) {
+        r.warnings.push(format!("The drive stopped responding for {:.1} s; long pauses like this make copies hang. Only 60 s without an I/O completion aborts the run.", s.seconds));
+    }
     if !r.stalls.is_empty() { r.warnings.push(r.stall_interpretation.clone()); }
 }
 
@@ -1202,12 +1230,12 @@ mod tests {
     fn blocked_triage_returns_a_problem_before_writing() {
         let mut d = CacheDev::new(MIB, MIB, SimMode::Genuine, MIB, 100e6, 20e6);
         let clock = d.clock.clone();
-        clock.sleep(12.);
+        clock.sleep(62.);
         let r = run_with(&mut d, DriveClass::Usb, false, limits(DriveClass::Usb, MIB), clock, &Ctx::new());
         assert_eq!(r.status, Status::Unreliable);
         assert_eq!(d.state.lock().unwrap().written, 0);
         assert_eq!(r.phases.len(), 1);
-        assert_eq!(r.phases[0].worst_ms, 12000.);
+        assert_eq!(r.phases[0].worst_ms, 62000.);
     }
 
     #[test]
@@ -1317,8 +1345,11 @@ mod tests {
         let mut l = limits(DriveClass::Usb, 128 * MIB);
         l.phases[2] = 0.5;
         let mut run = Run { clock, ctx: &ctx, limits: l, r: Diagnostics::default(), pat: Pattern::Seeded { tag: 9 }, end: 500., phase_start: 0., seq_end: 0, overhead: 0, mixed: (0,0), recovery: (0,0), before: None, observe: &mut || Ok(None), replayed: false, reads: Default::default() };
-        assert_eq!(run.probe(&mut d).unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert!(run.r.probe.is_none());
+        run.probe(&mut d).unwrap();
+        let p = run.r.probe.as_ref().unwrap();
+        assert!(p.partial);
+        assert_eq!(p.point_tags.iter().filter(|t| t.is_some()).count(), 1);
+        assert_eq!(p.status.bytes().filter(|&s| s == b'o').count(), 0);
         assert!(run.clock.now() <= 1.1);
         assert_eq!(run.r.written, 0);
     }
@@ -1349,6 +1380,251 @@ mod later_tests {
         let mut buf = AlignedBuf::new((end - start) as usize);
         pat.fill(start, &mut buf);
         d.write_at(start, &buf).unwrap();
+    }
+
+    #[derive(Clone)]
+    struct Pausing {
+        disk: CacheDev,
+        read_pause: std::sync::Arc<std::sync::Mutex<f64>>,
+        write_pause: std::sync::Arc<std::sync::Mutex<f64>>,
+        random_delay: f64,
+        wrap_after: Option<u64>,
+    }
+    impl Pausing {
+        fn new(size: u64) -> Self {
+            Self { disk: CacheDev::new(size, size, SimMode::Genuine, size, 100e6, 20e6), read_pause: Default::default(), write_pause: Default::default(), random_delay: 0., wrap_after: None }
+        }
+        fn pause(&self, value: &std::sync::Mutex<f64>) {
+            let seconds = std::mem::take(&mut *value.lock().unwrap());
+            if seconds > 0. { self.disk.clock.sleep(seconds); }
+        }
+    }
+    impl Dev for Pausing {
+        fn len(&self) -> u64 { self.disk.len() }
+        fn fork(&mut self) -> io::Result<Box<dyn Dev>> { Ok(Box::new(self.clone())) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+            if let Some(count) = self.wrap_after {
+                let mut s = self.disk.state.lock().unwrap();
+                if s.written / 4096 == count { s.disk.data.truncate(8 * MIB as usize); s.disk.mode = SimMode::Wrap; }
+            }
+            self.pause(&self.write_pause);
+            if buf.len() == 4096 && self.random_delay > 0. { self.disk.clock.sleep(self.random_delay); }
+            self.disk.write_at(off, buf)
+        }
+        fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+            self.pause(&self.read_pause);
+            self.disk.read_at(off, buf)
+        }
+    }
+
+    struct Discarding { disk: CacheDev, limit: Option<u64>, delay: f64, error: Option<io::ErrorKind>, calls: Vec<(u64, u64)> }
+    impl Dev for Discarding {
+        fn len(&self) -> u64 { self.disk.len() }
+        fn sector_size(&self) -> usize { 512 }
+        fn discard_max_bytes(&self) -> Option<u64> { self.limit }
+        fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
+            self.calls.push((off, len));
+            self.disk.clock.sleep(self.delay);
+            if let Some(kind) = self.error { return Err(io::Error::new(kind, "discard fixture")); }
+            self.disk.discard(off, len)
+        }
+        fn flush(&mut self) -> io::Result<()> { self.disk.clock.sleep(2.); Ok(()) }
+        fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> { self.disk.write_at(off, buf) }
+        fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> { self.disk.read_at(off, buf) }
+    }
+
+    #[test]
+    fn discard_chunks_obey_limits_budgets_and_keep_slow_successes() {
+        for (limit, delay, claimed, expected) in [
+            (Some(MIB + 1), 15., 32 * MIB, vec![(0, MIB), (MIB, MIB), (2 * MIB, MIB)]),
+            (None, 74.8, 20 * crate::dev::GIB, vec![(0, 8 * crate::dev::GIB)]),
+            (None, 1., 20 * crate::dev::GIB, vec![(0, 8 * crate::dev::GIB), (8 * crate::dev::GIB, 8 * crate::dev::GIB), (16 * crate::dev::GIB, 4 * crate::dev::GIB), (0, 4 * MIB)]),
+        ] {
+            let disk = CacheDev::new(32 * MIB, claimed, SimMode::Drop, 32 * MIB, 100e6, 20e6);
+            let ctx = Ctx::new();
+            let mut observe = || Ok(None);
+            let mut run = state(&disk, &ctx, &mut observe);
+            let mut d = Discarding { disk, limit, delay, error: None, calls: vec![] };
+            run.trim(&mut d).unwrap();
+            assert_eq!(d.calls, expected);
+            assert_eq!(run.r.status.exit_code(), 0);
+            assert!(run.r.stalls.iter().all(|s| s.offset.is_none()));
+            if delay >= 15. {
+                let trimmed = expected.iter().map(|(_, n)| n).sum::<u64>();
+                assert_eq!(run.r.trim, format!("partial: {trimmed} of {claimed} bytes trimmed"));
+                assert_eq!(ctx.status().done, trimmed);
+                assert_eq!(ctx.status().total, claimed);
+                // A new phase can proceed after a long discard returned successfully.
+                run.phase(3, "Sequential write");
+                run.write(&mut d, 0, &[0; 4096]).unwrap();
+            } else { assert!(run.r.trim.starts_with("effective")); }
+        }
+        for kind in [io::ErrorKind::Unsupported, io::ErrorKind::InvalidInput, io::ErrorKind::Other] {
+            let disk = CacheDev::new(MIB, MIB, SimMode::Genuine, MIB, 100e6, 20e6);
+            let ctx = Ctx::new();
+            let mut observe = || Ok(None);
+            let mut run = state(&disk, &ctx, &mut observe);
+            let mut d = Discarding { disk, limit: None, delay: 75., error: Some(kind), calls: vec![] };
+            assert_eq!(run.trim(&mut d).is_ok(), kind == io::ErrorKind::Unsupported);
+            assert_eq!(d.calls.len(), 1);
+        }
+    }
+
+    #[test]
+    fn pauses_below_sixty_seconds_warn_but_do_not_fail() {
+        for write in [false, true] {
+            for delay in [10., 30., 59., 60.] {
+                let mut d = Pausing::new(32 * MIB);
+                *if write { &d.write_pause } else { &d.read_pause }.lock().unwrap() = delay;
+                let clock = d.disk.clock.clone();
+                let limits = Limits { block: 64 * 1024, ..Limits::new(DriveClass::Usb, d.len(), 4096, None) };
+                let r = run_with(&mut d, DriveClass::Usb, false, limits, clock, &Ctx::new());
+                assert_eq!(r.status, if delay < 60. { Status::Ok } else { Status::Unreliable }, "{write} {delay}: {}", r.reason);
+                assert!(r.stalls.iter().any(|s| s.offset.is_some() && s.seconds >= delay));
+                assert!(r.warnings.iter().any(|w| w.contains("make copies hang")));
+                if delay >= 60. { assert!(r.reason.contains("No I/O completed")); }
+            }
+        }
+    }
+
+    #[test]
+    fn queued_and_random_io_keep_going_after_ten_second_pauses() {
+        for write in [false, true] {
+            for delay in [12., 60.] {
+                let mut d = Pausing::new(MIB);
+                let pat = Pattern::Seeded { tag: 12 };
+                fill(&mut d.disk, pat, 0, 8192);
+                *if write { &d.write_pause } else { &d.read_pause }.lock().unwrap() = delay;
+                let clock = d.disk.clock.clone();
+                let ctx = Ctx::new();
+                let (done, result) = if write { engine::write_window(&mut d, pat, 0, 8192, 4096, 1, clock.now() + 100., &clock, &ctx) }
+                    else { engine::read_window(&mut d, pat, 0, 8192, 4096, 1, clock.now() + 100., &clock, &ctx) };
+                result.unwrap();
+                assert_eq!(done.len(), if delay < 60. { 2 } else { 1 });
+                *if write { &d.write_pause } else { &d.read_pause }.lock().unwrap() = delay;
+                let r = crate::perf::random_io(vec![d.fork().unwrap()], crate::perf::RandomOpts { start: 0, span: 8192, write, pattern: Some(pat), deadline: clock.now() + 15. }, &clock, &ctx);
+                assert_eq!(r.error.is_some(), delay >= 60.);
+                assert!(!r.stalls.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn nonpositional_stalls_never_implicate_lba_zero() {
+        let disk = CacheDev::new(MIB, MIB, SimMode::Genuine, MIB, 100e6, 20e6);
+        let clock = disk.clock.clone();
+        let ctx = Ctx::new();
+        let mut observe = || { clock.sleep(3.); Ok(None) };
+        let mut run = state(&disk, &ctx, &mut observe);
+        let mut d = Discarding { disk, limit: None, delay: 4., error: None, calls: vec![] };
+        run.phase(0, "Flush"); run.flush(&mut d).unwrap();
+        run.phase(0, "Identity"); run.snapshot().unwrap();
+        run.phase(1, "TRIM"); run.discard(&mut d, 0, 4096).unwrap();
+        assert_eq!(run.r.stalls.len(), 3);
+        assert!(run.r.stalls.iter().all(|s| s.offset.is_none()));
+        assert!(!interpret_stalls(&run.r.stalls).contains("Bad regions"));
+        assert!(interpret_stalls(&run.r.stalls).contains("Throttling"));
+        let mut r = report(&DiskInfo::default(), run.r);
+        assert!(r.text().contains("no disk position"));
+        assert!(r.html().contains("no disk position"));
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["diagnostics"]["stalls"][0]["offset"].is_null());
+        let d = r.diagnostics.as_mut().unwrap();
+        for s in &mut d.stalls { s.offset = Some(0); }
+        assert!(interpret_stalls(&d.stalls).contains("Bad regions near 0 B"));
+    }
+
+    #[test]
+    fn slow_scattered_writes_thin_the_probe_and_preserve_partial_tags() {
+        for budget in [60., 35., 3.] {
+            let mut d = Pausing::new(64 * MIB);
+            d.random_delay = 1.;
+            let clock = d.disk.clock.clone();
+            let (step, points) = probe::grid(d.len(), 4096, 1024);
+            let p = probe::run_limited(&mut d, points, step, budget, &clock, &Ctx::new()).unwrap();
+            assert_eq!(p.partial, budget < 60.);
+            assert!(p.seconds < budget + 1.01);
+            assert!(p.step.is_power_of_two());
+            assert!(p.positions[..p.positions.len() - 1].iter().all(|p0| p0.is_multiple_of(p.step)));
+            if budget >= 35. { assert!((16..=32).contains(&p.positions.len())); }
+            if budget == 35. { assert!(p.point_tags.iter().flatten().collect::<std::collections::BTreeSet<_>>().len() > 1); }
+            let mut buf = AlignedBuf::new(4096);
+            for (&off, &tag) in p.positions.iter().zip(&p.point_tags) {
+                if let Some(tag) = tag {
+                    d.read_at(off, &mut buf).unwrap();
+                    assert!(Pattern::Seeded { tag }.buffer_ok(off, &buf));
+                }
+            }
+            if budget < 60. {
+                assert!(p.summary_lines()[0].contains("Capacity probe partial:"));
+                assert!(!p.summary_lines().join(" ").contains("2 passes"));
+                assert!(p.map_html().contains("p-unknown"));
+            }
+        }
+    }
+
+    #[test]
+    fn unfinished_or_coarse_fake_probes_do_not_overestimate_usable_capacity() {
+        for (real, budget, expected, switch) in [(8 * MIB, 25.011, 0, None), (8 * MIB, 60., 8 * MIB, None), (MIB, 60., 0, None), (64 * MIB, 42.0342, 0, Some(25))] {
+            let mut d = Pausing::new(real);
+            d.disk = CacheDev::new(real, 64 * MIB, SimMode::Wrap, 64 * MIB, 100e6, 20e6);
+            d.random_delay = 1.;
+            d.wrap_after = switch;
+            let clock = d.disk.clock.clone();
+            let (step, points) = probe::grid(d.len(), 4096, 1024);
+            let p = probe::run_limited(&mut d, points, step, budget, &clock, &Ctx::new()).unwrap();
+            assert_eq!(p.finding, Finding::Fake);
+            assert_eq!(p.usable, expected);
+            if expected == 0 {
+                assert!(p.module.is_none());
+                assert!(p.summary_lines().iter().any(|s| s.contains("estimate was not established")));
+            }
+        }
+    }
+
+    #[test]
+    fn partial_probe_can_finish_ok_and_fake_probe_still_stops() {
+        for fake in [false, true] {
+            let mut d = Pausing::new(64 * MIB);
+            if fake { d.disk = CacheDev::new(8 * MIB, 64 * MIB, SimMode::Wrap, 64 * MIB, 100e6, 20e6); }
+            d.random_delay = 1.;
+            let clock = d.disk.clock.clone();
+            let mut limits = Limits::new(DriveClass::Usb, d.len(), 4096, None);
+            limits.block = 64 * 1024;
+            limits.phases[2] = if fake { 60. } else { 35. };
+            let r = run_with(&mut d, DriveClass::Usb, false, limits, clock, &Ctx::new());
+            assert_eq!(r.status, if fake { Status::Fake } else { Status::Ok }, "{}", r.reason);
+            if fake { assert_eq!(r.written, 0); }
+            else {
+                assert!(r.final_complete && r.probe.as_ref().unwrap().partial);
+                assert!(r.warnings.iter().any(|w| w.contains("Capacity probe partial:")));
+                let r = report(&DiskInfo::default(), r);
+                assert!(r.text().contains("Capacity probe partial:"));
+                assert!(r.html().contains("Capacity probe partial:"));
+                let saved: crate::report::Report = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+                assert_eq!(saved.exit_code(), 0);
+                assert_eq!(saved.probe.unwrap().point_tags, r.probe.unwrap().point_tags);
+            }
+        }
+    }
+
+    #[test]
+    fn cache_caveat_requires_a_reported_drop_or_recovery() {
+        let mut d = Pausing::new(32 * MIB); // No discard support.
+        let clock = d.disk.clock.clone();
+        let limits = Limits { block: 64 * 1024, ..Limits::new(DriveClass::Usb, d.len(), 4096, None) };
+        let mut r = run_with(&mut d, DriveClass::Usb, false, limits, clock, &Ctx::new());
+        assert_eq!(r.status, Status::Ok);
+        assert!(r.drop_at.is_none() && r.recovery.is_empty());
+        assert!(!r.summary_lines().iter().chain(&r.warnings).any(|l| l.contains("may be understated")));
+        r.drop_at = Some(MIB);
+        assert!(r.summary_lines().iter().any(|l| l.contains("may be understated")));
+        r.drop_at = None;
+        r.recovery.push(Recovery { fast_bytes: MIB, ..Default::default() });
+        assert!(r.summary_lines().iter().any(|l| l.contains("may be understated")));
+        r.trim = "effective in the sample".into();
+        assert!(!r.summary_lines().iter().any(|l| l.contains("may be understated")));
     }
 
     #[test]
@@ -1586,11 +1862,11 @@ mod later_tests {
 
     #[test]
     fn stall_interpretation_requires_evidence() {
-        let mut stalls = vec![Stall { phase: "write".into(), offset: 2 * MIB, at: 10., seconds: 2., ..Default::default() }; 2];
+        let mut stalls = vec![Stall { phase: "write".into(), offset: Some(2 * MIB), at: 10., seconds: 2., ..Default::default() }; 2];
         assert!(interpret_stalls(&stalls).contains("Too few"));
-        stalls.push(Stall { phase: "read".into(), offset: 2 * MIB, at: 40., seconds: 3., ..Default::default() });
+        stalls.push(Stall { phase: "read".into(), offset: Some(2 * MIB), at: 40., seconds: 3., ..Default::default() });
         assert!(interpret_stalls(&stalls).contains("Bad regions"));
-        for (i,s) in stalls.iter_mut().enumerate() { s.offset = i as u64 * MIB; s.at = i as f64 * 10.; s.seconds = 2. + i as f64; }
+        for (i,s) in stalls.iter_mut().enumerate() { s.offset = Some(i as u64 * MIB); s.at = i as f64 * 10.; s.seconds = 2. + i as f64; }
         assert!(interpret_stalls(&stalls).contains("Throttling"));
         stalls[2].at = 900.;
         assert!(interpret_stalls(&stalls).contains("Random hiccups"));
@@ -1611,7 +1887,7 @@ mod later_tests {
                 1 => r.identity_changes.push("serial".into()),
                 2 => r.tally.stale = 1,
                 3 => r.smart = Some(SmartRun { changes: vec![crate::smart::Change { what: Counter::LinkErrors, before: 0, after: 1 }], ..Default::default() }),
-                _ => { r.status = Status::Unreliable; r.reason = "No I/O completed for 10 s".into(); }
+                _ => { r.status = Status::Unreliable; r.reason = "No I/O completed for 60 s".into(); }
             }
             finish_verdict(&mut r);
             assert_eq!(r.status.exit_code(), 1);
@@ -1631,7 +1907,7 @@ mod later_tests {
         assert!(run.replayed);
         run.verify(&mut d, run.pat, 0, 8 * MIB as usize, false).unwrap();
         assert_eq!(run.r.stalls.len(), 3);
-        let mut slow = CacheDev::new(MIB, MIB, SimMode::Genuine, 0, 256., 256.);
+        let mut slow = CacheDev::new(MIB, MIB, SimMode::Genuine, 0, 64., 64.);
         let mut run = state(&slow, &ctx, &mut observe);
         assert!(run.sequential(&mut slow, true).unwrap_err().to_string().contains("No I/O completed"));
         assert_eq!(slow.state.lock().unwrap().written, 4096);

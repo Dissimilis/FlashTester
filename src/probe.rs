@@ -62,9 +62,18 @@ pub struct ProbeResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<u64>,
     pub examples: Vec<String>,
+    /// Diagnostics may finish before both passes. w = written but unchecked, ? = untouched.
+    #[serde(default)]
+    pub partial: bool,
+    /// Latest tag per point, including writes from an unfinished second pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub point_tags: Vec<Option<u64>>,
 }
 
 impl ProbeResult {
+    pub fn partial_summary(&self) -> String {
+        format!("Capacity probe partial: {} of {} points verified; the two-pass probe did not finish.", self.status.bytes().filter(|&s| s == b'o').count(), self.positions.len())
+    }
     pub fn summary_lines(&self) -> Vec<String> {
         let mut v = vec![format!(
             "Capacity probe ({}): {} positions every {} across {} claimed, 2 passes, {:.0} s.",
@@ -74,8 +83,11 @@ impl ProbeResult {
             size(self.claimed),
             self.seconds
         )];
+        if self.partial { v[0] = self.partial_summary(); }
         match self.finding {
+            Finding::Genuine if self.partial => v.push("No fault was found in the checked samples. Run a full test to check every byte.".into()),
             Finding::Genuine => v.push(format!("All sampled positions retained their data. Sampling interval: {}. Run a full test to check the space between them.", size(self.step))),
+            Finding::Fake if self.usable == 0 => v.push("Aliased data proves fake capacity; a usable-capacity estimate was not established. Run the standalone probe to measure the boundary.".into()),
             Finding::Fake => {
                 v.push(format!("Only about {} really stores data ({:.1}% of the claimed {}).", size(self.usable), self.usable as f64 * 100.0 / self.claimed.max(1) as f64, size(self.claimed)));
                 if let Some(m) = self.module {
@@ -97,6 +109,7 @@ impl ProbeResult {
             let cls = match c {
                 'o' => "p-ok",
                 'a' => "p-alias",
+                '?' | 'w' => "p-unknown",
                 _ => "p-bad",
             };
             s.push_str(&format!("<i class={cls} title=\"{}\"></i>", size(*p)));
@@ -247,10 +260,123 @@ pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode
     run_inner(dev, positions, step, claimed, mode, None, ctx)
 }
 
-/// Diagnostics supplies a deadline-enforcing Dev; established fakes need no refinement.
-pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: f64, ctx: &Ctx) -> io::Result<ProbeResult> {
-    let claimed = dev.len();
-    run_inner(dev, positions, step, claimed, "raw", Some(budget_s), ctx)
+/// Only this marker means a phase budget; an OS timeout remains an I/O error.
+#[derive(Debug)]
+pub(crate) struct Budget;
+impl std::fmt::Display for Budget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("phase budget reached") }
+}
+impl std::error::Error for Budget {}
+
+fn limited_write(dev: &mut dyn Dev, r: &mut ProbeResult, i: usize, tag: u64, buf: &mut [u8]) -> io::Result<()> {
+    Pattern::Seeded { tag }.fill(r.positions[i], buf);
+    dev.write_at(r.positions[i], buf)?;
+    r.point_tags[i] = Some(tag);
+    r.status.replace_range(i..i + 1, "w");
+    r.tag = Some(tag);
+    Ok(())
+}
+
+fn limited_read(dev: &mut dyn Dev, r: &mut ProbeResult, i: usize, buf: &mut [u8]) -> io::Result<bool> {
+    if dev.read_at(r.positions[i], buf)? != buf.len() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short probe read")); }
+    let got = classify_block(Pattern::Seeded { tag: r.point_tags[i].unwrap() }, r.positions[i], buf);
+    let c = match got { Got::Ok => "o", Got::Alias(_) => "a", Got::Stale => "s", _ => "x" };
+    r.status.replace_range(i..i + 1, c);
+    if got != Got::Ok {
+        r.bad += 1;
+        r.first_bad.get_or_insert(r.positions[i]);
+        if let Got::Alias(src) = got {
+            let distance = src.abs_diff(r.positions[i]);
+            r.module = Some(r.module.map_or(distance, |m| m.min(distance)));
+            r.finding = Finding::Fake;
+            if r.examples.len() < 5 { r.examples.push(format!("Position {} returned the data written to {}", size(r.positions[i]), size(src))); }
+        } else if r.finding != Finding::Fake {
+            r.finding = Finding::Defective;
+            r.usable = r.first_bad.unwrap();
+        }
+    }
+    Ok(got != Got::Ok)
+}
+
+/// A bounded two-pass probe. Calibration and unfinished passes retain their tags;
+/// final verification can check every successful write without guessing its pattern.
+pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: f64, clock: &crate::engine::Clock, ctx: &Ctx) -> io::Result<ProbeResult> {
+    if positions.is_empty() { return Err(io::Error::other("no probe positions")); }
+    let started = clock.now();
+    let end = started + budget_s;
+    let ready = || {
+        if ctx.cancelled() { Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")) }
+        else if clock.now() >= end { Err(io::Error::new(io::ErrorKind::TimedOut, Budget)) } else { Ok(()) }
+    };
+    let block = BLOCK.max(dev.align());
+    let n = positions.len();
+    let mut r = ProbeResult { mode: "raw".into(), claimed: dev.len(), usable: dev.len(), step, block: block as u64,
+        positions, point_tags: vec![None; n], status: "?".repeat(n), partial: true, ..Default::default() };
+    let mut buf = AlignedBuf::new(block);
+    let mut read_pass_complete = false;
+    let result: io::Result<()> = (|| {
+        // Calibrate on the coarsest permitted grid, so thinning retains these writes.
+        let mut coarse = 1;
+        while (n - 1).div_ceil(coarse * 2) + 1 >= 16 { coarse *= 2; }
+        let indices: Vec<_> = (0..n).filter(|&i| r.positions[i].is_multiple_of(step * coarse as u64) || i == n - 1).collect();
+        let mut times = vec![];
+        let tag = new_tag();
+        for i in 0..indices.len().min(8) {
+            let index = indices[i * indices.len() / indices.len().min(8)];
+            ready()?;
+            let t = clock.now();
+            limited_write(dev, &mut r, index, tag, &mut buf)?;
+            ready()?;
+            if limited_read(dev, &mut r, index, &mut buf)? { return Ok(()); }
+            times.push(clock.now() - t);
+        }
+        times.sort_by(f64::total_cmp);
+        let pair = times[times.len() / 2].max(1e-9);
+        let max = ((end - clock.now()).max(0.) / (2. * pair)).floor().max(16.) as usize;
+        let mut k = 1;
+        while (n - 1).div_ceil(k) + 1 > max && k < coarse { k *= 2; }
+        if k > 1 {
+            let keep: Vec<_> = (0..n).filter(|&i| r.positions[i].is_multiple_of(step * k as u64) || i == n - 1).collect();
+            r.positions = keep.iter().map(|&i| r.positions[i]).collect();
+            r.point_tags = keep.iter().map(|&i| r.point_tags[i]).collect();
+            r.status = keep.iter().map(|&i| r.status.as_bytes()[i] as char).collect();
+            r.step *= k as u64;
+            ctx.log(format!("Random writes are slow: probing {} points every {} within the remaining budget.", r.positions.len(), size(r.step)));
+        }
+        for reverse in [false, true] {
+            read_pass_complete = false;
+            let mut order: Vec<_> = (0..r.positions.len()).collect();
+            if reverse { order.reverse(); }
+            let tag = new_tag();
+            ctx.phase("Capacity probe: writing", order.len() as u64);
+            for (j, &i) in order.iter().enumerate() {
+                ready()?;
+                limited_write(dev, &mut r, i, tag, &mut buf)?;
+                ctx.progress(j as u64 + 1);
+            }
+            ready()?;
+            dev.flush()?;
+            ctx.phase("Capacity probe: reading", order.len() as u64);
+            for (j, &i) in order.iter().enumerate() {
+                ready()?;
+                limited_read(dev, &mut r, i, &mut buf)?;
+                ctx.progress(j as u64 + 1);
+            }
+            read_pass_complete = true;
+            if r.bad > 0 { return Ok(()); }
+        }
+        r.partial = false;
+        Ok(())
+    })();
+    if let Err(e) = result && !e.get_ref().is_some_and(|e| e.is::<Budget>()) { return Err(e); }
+    if r.finding == Finding::Fake {
+        // One alias can span many wraps. A partial read pass or a period at/below
+        // the grid spacing cannot safely supply a capacity for repartitioning.
+        r.module = r.module.filter(|m| read_pass_complete && *m > r.step && m.is_power_of_two());
+        r.usable = r.module.unwrap_or(0);
+    }
+    r.seconds = clock.now() - started;
+    Ok(r)
 }
 
 #[allow(clippy::too_many_arguments)]

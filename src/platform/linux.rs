@@ -645,6 +645,7 @@ impl Dev for RawDisk {
         self.wrote |= self.writable;
         Ok(Box::new(crate::dev::IoHandle { file: crate::dev::io_handle(&self.file, self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
     }
+    fn discard_max_bytes(&self) -> Option<u64> { read(format!("/sys/block/{}/queue/discard_max_bytes", self.id)).parse().ok() }
     fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
         super::discard_range(self.writable, self.size, self.sector, off, len)?;
         self.wrote = true;

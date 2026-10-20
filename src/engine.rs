@@ -94,7 +94,7 @@ fn io_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block: usize
             let (c, r) = window_io(dev, pat, off, &mut buf[..n], write, clock);
             result = r;
             completed.push(c);
-            if result.is_err() || completed.last().unwrap().gap >= 10.0 { break; }
+            if result.is_err() || completed.last().unwrap().gap >= 60.0 { break; }
             off += n as u64;
         }
         return (completed, result);
@@ -130,7 +130,7 @@ fn io_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block: usize
         while pending > 0 {
             let (id, c, r) = rx.recv().unwrap();
             pending -= 1;
-            stalled |= c.gap >= 10.0;
+            stalled |= c.gap >= 60.0;
             completed.push(c);
             if result.is_ok() { result = r; }
             if result.is_ok() && !stalled && next < end && clock.now() < deadline && !ctx.cancelled() {

@@ -229,7 +229,7 @@ impl Report {
             for p in &d.phases { let _ = writeln!(s, "{:<27} {:>7.1}s {:>10.2} {:>8.2} {:>10.2}", p.name, p.seconds, p.median_ms, p.p99_ms, p.worst_ms); }
             for z in &d.zones { let _ = writeln!(s, "{}: {} verified in {}..{}; 4K read {} ms", z.name, size(z.verified), size(z.start), size(z.end), z.read_4k_ms.map(|v| format!("{v:.2}")).unwrap_or_else(|| "not measured".into())); }
             let _ = writeln!(s, "Verification reads: {} intact sectors, {} mismatches (repeated reads included).", d.tally.ok, d.tally.lost());
-            for stall in &d.stalls { let _ = writeln!(s, "Stall: {} at {}, {:.2} s into the run, blocked {:.2} s{}", stall.phase, size(stall.offset), stall.at, stall.seconds, if stall.write_path { "; read-back was fast and correct" } else { "" }); }
+            for stall in &d.stalls { let _ = writeln!(s, "Stall: {} at {}, {:.2} s into the run, blocked {:.2} s{}", stall.phase, stall.offset.map(size).unwrap_or_else(|| "no disk position".into()), stall.at, stall.seconds, if stall.write_path { "; read-back was fast and correct" } else { "" }); }
         }
         if let Some(p) = &self.probe {
             let _ = writeln!(s);
@@ -447,7 +447,7 @@ fn diagnostics_html(d: &crate::diagnose::Diagnostics) -> String {
     let _ = write!(b, "<h2>Stalls</h2><p>{}</p>", esc(&d.stall_interpretation));
     if !d.stalls.is_empty() {
         b.push_str("<table><tr><th>Phase</th><th>Position</th><th>Run time</th><th>Blocked</th><th>Read-back</th></tr>");
-        for s in &d.stalls { let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{:.2} s</td><td>{:.2} s</td><td>{}</td></tr>", esc(&s.phase), size(s.offset), s.at, s.seconds, if s.write_path { "fast and correct: write-path stall" } else { "not established" }); }
+        for s in &d.stalls { let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{:.2} s</td><td>{:.2} s</td><td>{}</td></tr>", esc(&s.phase), s.offset.map(size).unwrap_or_else(|| "no disk position".into()), s.at, s.seconds, if s.write_path { "fast and correct: write-path stall" } else { "not established" }); }
         b.push_str("</table>");
     }
     b.push_str("</section>");
@@ -708,7 +708,7 @@ impl Report {
         }
         b.push_str("</ul>");
         if let Some(p) = &self.probe {
-            let _ = write!(b, "<h2>Capacity map</h2><p class=mut>Each cell is one test position across the claimed capacity, in order. Green: data stored and read back correctly. Red: data lost. Amber: data overwritten by a write to another position (wraparound).</p>{}", p.map_html());
+            let _ = write!(b, "<h2>Capacity map</h2><p class=mut>Each cell is one test position across the claimed capacity, in order. Green: data stored and read back correctly. Red: data lost. Amber: data overwritten by a write to another position (wraparound). Gray: not checked.</p>{}", p.map_html());
         } else if let Some(v) = self.verify.last() {
             b.push_str("<h2>Test coverage</h2><p class=mut>Green: checked without errors. Red: lost or unreadable data. Amber: data from another position. Gray: not checked or detailed results unavailable.</p>");
             let span = self.tested.max(self.write.last().map_or(0, |w| w.end));

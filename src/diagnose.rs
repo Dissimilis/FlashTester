@@ -227,8 +227,10 @@ impl Diagnostics {
         } else {
             lines.push(format!("Sequential write: no drop in the first {}.", size(self.written)));
             if let Some(sustained) = self.sustained_mb_s {
-                lines.push(if self.write_pattern == "bursts with regular pauses" {
-                    format!("Writes in bursts at {:.1} MB/s with regular pauses; sustained {sustained:.1} MB/s.", self.burst_mb_s.unwrap_or(self.peak_mb_s))
+                // Bursts are only worth naming when they are clearly faster than the average.
+                let burst = self.burst_mb_s.unwrap_or(self.peak_mb_s);
+                lines.push(if self.write_pattern == "bursts with regular pauses" && burst > sustained * 1.1 {
+                    format!("Writes in bursts at {burst:.1} MB/s with regular pauses; sustained {sustained:.1} MB/s.")
                 } else { format!("Sequential writes sustained {sustained:.1} MB/s.") });
             } else if self.peak_mb_s > 0. { lines.push(format!("Write speed: {:.1} MB/s.", self.peak_mb_s)); }
             if self.write_pattern == "bursts with regular pauses" && !self.trim.starts_with("effective") {

@@ -298,6 +298,17 @@ fn limited_read(dev: &mut dyn Dev, r: &mut ProbeResult, i: usize, buf: &mut [u8]
     Ok(got != Got::Ok)
 }
 
+fn thin_limited(r: &mut ProbeResult, step: u64, ctx: &Ctx) {
+    let last = *r.positions.last().unwrap();
+    let keep: Vec<_> = (0..r.positions.len()).filter(|&i| r.positions[i].is_multiple_of(step)
+        || r.positions[i] == last || r.point_tags[i].is_some()).collect();
+    r.positions = keep.iter().map(|&i| r.positions[i]).collect();
+    r.point_tags = keep.iter().map(|&i| r.point_tags[i]).collect();
+    r.status = keep.iter().map(|&i| r.status.as_bytes()[i] as char).collect();
+    r.step = step;
+    ctx.log(format!("Random writes are slow: probing {} points every {} within the remaining budget.", r.positions.len(), size(r.step)));
+}
+
 /// A bounded two-pass probe. Calibration and unfinished passes retain their tags;
 /// final verification can check every successful write without guessing its pattern.
 pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: f64, clock: &crate::engine::Clock, ctx: &Ctx) -> io::Result<ProbeResult> {
@@ -320,6 +331,7 @@ pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: 
         while (n - 1).div_ceil(coarse * 2) + 1 >= 16 { coarse *= 2; }
         let indices: Vec<_> = (0..n).filter(|&i| r.positions[i].is_multiple_of(step * coarse as u64) || i == n - 1).collect();
         let mut times = vec![];
+        let mut read_time: f64 = 0.;
         let tag = new_tag();
         for i in 0..indices.len().min(8) {
             let index = indices[i * indices.len() / indices.len().min(8)];
@@ -327,7 +339,9 @@ pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: 
             let t = clock.now();
             limited_write(dev, &mut r, index, tag, &mut buf)?;
             ready()?;
+            let read_start = clock.now();
             if limited_read(dev, &mut r, index, &mut buf)? { return Ok(()); }
+            read_time = read_time.max(clock.now() - read_start);
             times.push(clock.now() - t);
         }
         times.sort_by(f64::total_cmp);
@@ -335,25 +349,36 @@ pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: 
         let max = ((end - clock.now()).max(0.) / (2. * pair)).floor().max(16.) as usize;
         let mut k = 1;
         while (n - 1).div_ceil(k) + 1 > max && k < coarse { k *= 2; }
-        if k > 1 {
-            let keep: Vec<_> = (0..n).filter(|&i| r.positions[i].is_multiple_of(step * k as u64) || i == n - 1).collect();
-            r.positions = keep.iter().map(|&i| r.positions[i]).collect();
-            r.point_tags = keep.iter().map(|&i| r.point_tags[i]).collect();
-            r.status = keep.iter().map(|&i| r.status.as_bytes()[i] as char).collect();
-            r.step *= k as u64;
-            ctx.log(format!("Random writes are slow: probing {} points every {} within the remaining budget.", r.positions.len(), size(r.step)));
-        }
+        if k > 1 { thin_limited(&mut r, step * k as u64, ctx); }
+        let mut write_time = (pair - read_time).max(1e-9);
         for reverse in [false, true] {
             read_pass_complete = false;
+            let tag = new_tag();
+            ctx.phase("Capacity probe: writing", r.positions.len() as u64);
+            loop {
+                let next = if reverse { r.point_tags.iter().rposition(|&t| t != Some(tag)) }
+                    else { r.point_tags.iter().position(|&t| t != Some(tag)) };
+                let Some(i) = next else { break; };
+                ready()?;
+                let t = clock.now();
+                limited_write(dev, &mut r, i, tag, &mut buf)?;
+                write_time = write_time.max(clock.now() - t);
+                // Cached calibration writes can hide slow flash. Refit both passes
+                // after each write, retaining off-grid writes and their exact tags.
+                if !reverse {
+                    while r.step < step * coarse as u64 {
+                        let left = r.point_tags.iter().filter(|&&t| t != Some(tag)).count();
+                        let needed = left as f64 * write_time + r.positions.len() as f64 * (write_time + 2. * read_time);
+                        if needed <= end - clock.now() { break; }
+                        let next_step = r.step * 2;
+                        thin_limited(&mut r, next_step, ctx);
+                        ctx.phase("Capacity probe: writing", r.positions.len() as u64);
+                    }
+                }
+                ctx.progress(r.point_tags.iter().filter(|&&t| t == Some(tag)).count() as u64);
+            }
             let mut order: Vec<_> = (0..r.positions.len()).collect();
             if reverse { order.reverse(); }
-            let tag = new_tag();
-            ctx.phase("Capacity probe: writing", order.len() as u64);
-            for (j, &i) in order.iter().enumerate() {
-                ready()?;
-                limited_write(dev, &mut r, i, tag, &mut buf)?;
-                ctx.progress(j as u64 + 1);
-            }
             ready()?;
             dev.flush()?;
             ctx.phase("Capacity probe: reading", order.len() as u64);
@@ -604,6 +629,58 @@ mod tests {
         let mut d = MemDev::new(real, claimed, mode);
         let (step, pos) = grid(claimed, BLOCK as u64, 256);
         run(&mut d, pos, step, claimed, "raw", &Ctx::new()).unwrap()
+    }
+
+    #[test]
+    fn cached_calibration_is_replaced_by_live_write_timing() {
+        struct SlowFlash {
+            clock: crate::engine::Clock,
+            data: std::collections::BTreeMap<u64, Vec<u8>>,
+            writes: Vec<u64>,
+            real: u64,
+            corrupt: bool,
+            cached_writes: usize,
+        }
+        impl Dev for SlowFlash {
+            fn len(&self) -> u64 { 62_000_000_000 }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+                self.clock.sleep(if self.writes.len() < self.cached_writes { 0.001 } else { 1. });
+                self.writes.push(off);
+                self.data.insert(off % self.real, buf.to_vec());
+                Ok(())
+            }
+            fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+                self.clock.sleep(0.001);
+                buf.copy_from_slice(self.data.get(&(off % self.real)).unwrap());
+                if self.corrupt && self.writes.len() > 8 && off == 0 { buf.fill(0); }
+                Ok(buf.len())
+            }
+        }
+        for (real, corrupt, cached_writes) in [(62_000_000_000, false, 8), (62_000_000_000, false, 16), (8 * GIB, false, 8), (MIB, false, 8), (62_000_000_000, true, 8)] {
+            let clock = crate::engine::Clock::simulated();
+            let mut d = SlowFlash { clock: clock.clone(), data: Default::default(), writes: vec![], real, corrupt, cached_writes };
+            let (step, points) = grid(d.len(), 4096, 1024);
+            assert!(points.len() > 900);
+            let p = run_limited(&mut d, points, step, 60., &clock, &Ctx::new()).unwrap();
+            assert!(p.seconds < 60.);
+            assert!(p.step.is_power_of_two() && p.step > step);
+            assert!((16..=32).contains(&p.positions.len()));
+            assert!(d.writes.iter().all(|off| p.positions.contains(off)), "lost an already-written point");
+            let (base, _) = grid(d.len(), 4096, 1024);
+            let expected: Vec<_> = (0..d.len().div_ceil(p.step)).map(|i| i * p.step).collect();
+            assert!(expected.iter().all(|off| p.positions.contains(off)));
+            assert!(p.step.is_multiple_of(base));
+            if real == d.len() && !corrupt {
+                assert!(!p.partial);
+                assert!(p.status.bytes().all(|c| c == b'o'));
+                assert!(p.positions.iter().all(|off| d.writes.iter().filter(|&p| p == off).count() >= 2));
+            } else {
+                assert_eq!(p.finding, if corrupt { Finding::Defective } else { Finding::Fake });
+                assert!(p.usable <= real);
+                if real <= p.step && !corrupt { assert_eq!(p.usable, 0); }
+            }
+        }
     }
 
     #[test]

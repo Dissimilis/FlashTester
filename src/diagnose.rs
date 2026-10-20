@@ -135,7 +135,7 @@ pub struct Diagnostics {
     pub trim: String,
     pub written: u64,
     pub distinct_upper_bound: u64,
-    /// First fast stretch on a drop, otherwise sample-median burst speed. Legacy JSON name.
+    /// Sustained speed before a drop, otherwise sample-median burst speed. Legacy JSON name.
     pub peak_mb_s: f64,
     #[serde(default)]
     pub burst_mb_s: Option<f64>,
@@ -202,6 +202,15 @@ pub fn report(disk: &DiskInfo, d: Diagnostics) -> crate::report::Report {
 }
 
 impl Diagnostics {
+    fn check_drop(&mut self) {
+        if self.drop_at.is_some() && self.post_mb_s.is_some_and(|s| s >= self.peak_mb_s * 0.9) {
+            self.drop_at = None;
+            self.drop_confirmed_at = None;
+            self.cache_bytes = None;
+            self.post_mb_s = None;
+            self.peak_mb_s = self.burst_mb_s.or(self.sustained_mb_s).unwrap_or(self.peak_mb_s);
+        }
+    }
     fn cache_caveat(&self) -> bool { !self.trim.starts_with("effective") && (self.drop_at.is_some() || !self.recovery.is_empty()) }
     pub fn summary_lines(&self) -> Vec<String> {
         use crate::report::{size, duration};
@@ -259,7 +268,7 @@ impl Diagnostics {
 #[derive(Default)]
 struct DropWatch {
     samples: Vec<Sample>, reference: f64, peak: f64, burst: f64, sustained: f64, sawtooth: bool,
-    // First fast stretch [start, end), then the start of the sustained measurement.
+    // Before the onset [start, end), then the start of the sustained measurement.
     confirmed: Option<(usize, usize, usize)>,
 }
 fn median(mut values: Vec<f64>) -> f64 {
@@ -348,18 +357,20 @@ impl DropWatch {
         // A lasting lower level also counts. Require several samples so one
         // long pause cannot masquerade as a lower plateau; bursts reset the hold.
         let low = (end..n).rfind(|&i| self.samples[i].mb_s > before * 0.85).map_or(end, |i| i + 1);
-        if n - low >= 5 {
+        if self.confirmed.is_none() && n - low >= 5 {
             for (fraction, hold) in [(0.75, 10.), (0.85, 20.)] {
                 let mut since = None;
                 for j in low + 1..=n {
                     if self.window_speed(start, j).is_some_and(|s| s <= before * fraction) {
                         let t = *since.get_or_insert(self.time(j));
-                        if self.time(j) - t >= hold { self.confirmed = Some((start, end, end)); }
+                        // Use the low region that survived the hold, not an earlier
+                        // dip. Only the sawtooth rule uses the first stretch boundary.
+                        if self.time(j) - t >= hold { self.confirmed = Some((start, low, low)); }
                     } else { since = None; }
                 }
             }
         }
-        if self.confirmed.is_some() { self.peak = before; Some(self.samples[end].offset) } else { None }
+        if let Some((a, b, _)) = self.confirmed { self.peak = self.speed(a, b); Some(self.samples[b].offset) } else { None }
     }
 }
 
@@ -1124,7 +1135,9 @@ fn run_core(dev: &mut dyn Dev, class: DriveClass, before: Option<Smart>, limits:
         if !short { let result = run.trim(dev); run.soft(result)?; }
         let result = run.probe(dev); run.soft(result)?;
         if run.r.status.exit_code() == 1 { return Ok(()); }
-        let result = run.sequential(dev, short); run.soft(result)?;
+        let result = run.sequential(dev, short);
+        run.r.check_drop(); // A rebound invalidates cache figures before recovery testing.
+        run.soft(result)?;
         if !short {
             let result = run.small(dev); run.soft(result)?;
             let result = run.recover(dev); run.soft(result)?;
@@ -1147,6 +1160,7 @@ fn run_core(dev: &mut dyn Dev, class: DriveClass, before: Option<Smart>, limits:
 }
 
 fn finish_verdict(r: &mut Diagnostics) {
+    r.check_drop();
     if r.status == Status::Cancelled { return; }
     if r.status.exit_code() != 1 {
         r.status = if r.triage_failing || !r.identity_changes.is_empty() || r.smart.as_ref().is_some_and(|s| s.changes.iter().any(|c| c.what.bad() && c.after > c.before)) { Status::Unreliable }
@@ -1227,6 +1241,10 @@ mod tests {
         let measured = watch.after().unwrap_or(watch.sustained);
         assert!((sustained.0..=sustained.1).contains(&measured), "{name}: {measured}");
         if let Some((lo, hi)) = cache_mb { assert!((lo..=hi).contains(&(watch.cache_bytes().unwrap() as f64 / 1e6))); }
+        if name == "wd_ssd_fedora_30m" {
+            assert!((554. * GB as f64..555. * GB as f64).contains(&(found.unwrap() as f64)));
+            assert!((675. ..680.).contains(&confirmed), "confirmation moved: {confirmed}");
+        }
         if name.starts_with("kingston") || name.starts_with("verbatim") {
             assert!(confirmed < Limits::new(DriveClass::Usb2, 64 * GB, 4096, None).phases[3] - 5., "confirmation must leave time for read checks");
         }
@@ -1235,6 +1253,7 @@ mod tests {
             trim: "unsupported".into(), baseline_read_mb_s: Some(100.), final_complete: true, probe: Some(Default::default()), ..Default::default() };
         watch.update(&mut d);
         finish_verdict(&mut d);
+        assert_eq!(d.drop_at, found); // The final consistency guard must retain genuine drops.
         assert!(!d.warnings.iter().any(|s| s.contains("very slow")));
         if expectation.contains("sawtooth") && !expected_drop {
             assert_eq!(d.write_pattern, "bursts with regular pauses");
@@ -1252,8 +1271,8 @@ mod tests {
         for field in ["burst_mb_s", "sustained_mb_s", "write_pattern", "cache_bytes"] { json["diagnostics"].as_object_mut().unwrap().remove(field); }
         let old: crate::report::Report = serde_json::from_value(json).unwrap();
         assert!(old.diagnostics.unwrap().sustained_mb_s.is_none());
-        println!("{name}: {} {:.2} MB/s, sustained/after {measured:.2} MB/s, cache {:?} MB, confirmed {confirmed:.2} s",
-            if expected_drop { "before" } else { "burst" }, watch.peak, watch.cache_bytes().map(|n| n as f64 / 1e6));
+        println!("{name}: {} {:.2} MB/s, sustained/after {measured:.2} MB/s, onset {:?} MB, cache {:?} MB, confirmed {confirmed:.2} s",
+            if expected_drop { "before" } else { "burst" }, watch.peak, found.map(|n| n as f64 / 1e6), watch.cache_bytes().map(|n| n as f64 / 1e6));
     }
 
     #[test]
@@ -1274,6 +1293,77 @@ mod tests {
     fn trace_lexar_r3() { hardware_trace("lexar_r3", (24., 30.), (35., 45.), None); }
     #[test]
     fn trace_wd_ssd_p4() { hardware_trace("wd_ssd_p4", (340., 360.), (340., 360.), None); }
+
+    #[test]
+    fn trace_wd_ssd_fedora_30m() { hardware_trace("wd_ssd_fedora_30m", (825., 845.), (360., 420.), Some((554_000., 555_000.))); }
+    #[test]
+    fn trace_wd_ssd_fedora_default() { hardware_trace("wd_ssd_fedora_default", (840., 860.), (825., 850.), None); }
+
+    #[test]
+    fn early_dips_do_not_move_a_later_sustained_cliff() {
+        let mut d = CacheDev::new(4 * MIB, 4 * MIB, SimMode::Genuine, 4 * MIB, 40960., 16384.);
+        let mut watch = DropWatch::default();
+        let mut found = None;
+        for i in 0..300 {
+            // A multi-second early dip, followed by a long fast region and a real cliff.
+            let speed = if i >= 200 { 16384. } else if (20..32).contains(&i) { 28672. } else { 40960. };
+            { let mut s = d.state.lock().unwrap(); s.fast = speed; s.slow = speed; }
+            let start = d.clock.now();
+            d.write_at(i * 8192, &[0;8192]).unwrap();
+            found = watch.push(Sample { seconds: d.clock.now(), offset: i * 8192, bytes: 8192, mb_s: 8192. / 1e6 / (d.clock.now() - start) });
+            if i < 220 { assert!(found.is_none()); }
+        }
+        assert_eq!(found, Some(200 * 8192));
+        assert_eq!(watch.cache_bytes(), found);
+        assert!((0.039..0.041).contains(&watch.peak));
+        assert!((watch.after().unwrap() - 0.016384).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_rebound_discards_drop_figures_but_keeps_other_results() {
+        let mut d = CacheDev::new(2 * MIB, 2 * MIB, SimMode::Genuine, 20 * 8192, 40960., 16384.);
+        let mut watch = DropWatch::default();
+        let mut found = None;
+        for i in 0..150 {
+            if i == 50 {
+                assert!(found.is_some());
+                d.state.lock().unwrap().slow = 81920.;
+            }
+            let start = d.clock.now();
+            d.write_at(i * 8192, &[0;8192]).unwrap();
+            found = watch.push(Sample { seconds: d.clock.now(), offset: i * 8192, bytes: 8192, mb_s: 8192. / 1e6 / (d.clock.now() - start) });
+        }
+        assert!(watch.after().unwrap() > watch.peak);
+        let mut measured = Diagnostics { written: 150 * 8192, drop_at: found, drop_confirmed_at: Some(50 * 8192), post_mb_s: watch.after(),
+            final_complete: true, probe: Some(Default::default()), read_mb_s: Some(77.), trim: "unsupported".into(), ..Default::default() };
+        watch.update(&mut measured);
+        measured.tally.ok = 42;
+        for status in [Status::Ok, Status::Unreliable, Status::Cancelled] {
+            let mut r = measured.clone();
+            r.status = status;
+            finish_verdict(&mut r);
+            assert_eq!(r.status, status);
+            assert_eq!(r.read_mb_s, Some(77.));
+            assert_eq!(r.tally.ok, 42);
+            assert!(r.probe.is_some());
+            assert!(r.drop_at.is_none() && r.drop_confirmed_at.is_none() && r.cache_bytes.is_none() && r.post_mb_s.is_none());
+            assert_eq!(r.peak_mb_s, watch.burst);
+            assert!(!r.warnings.iter().any(|s| s.contains("Cache figures")));
+            let report = report(&DiskInfo::default(), r);
+            assert!(report.text().contains("no drop in the first"));
+            assert!(report.html().contains("Sequential writes sustained"));
+            assert!(!report.text().contains("before the drop"));
+            let json = serde_json::to_value(&report).unwrap();
+            assert!(json["diagnostics"]["drop_at"].is_null());
+            assert!(json["diagnostics"]["post_mb_s"].is_null());
+        }
+        for (ratio, keep) in [(0.899, true), (0.9, false), (1.1, false)] {
+            let mut r = measured.clone();
+            r.post_mb_s = Some(r.peak_mb_s * ratio);
+            r.check_drop();
+            assert_eq!(r.drop_at.is_some(), keep);
+        }
+    }
 
     #[test]
     fn short_boundary_dips_do_not_move_a_later_cliff() {

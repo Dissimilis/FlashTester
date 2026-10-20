@@ -220,7 +220,7 @@ impl Diagnostics {
             if let Some(sustained) = self.sustained_mb_s {
                 lines.push(if self.write_pattern == "bursts with regular pauses" {
                     format!("Writes in bursts at {:.1} MB/s with regular pauses; sustained {sustained:.1} MB/s.", self.burst_mb_s.unwrap_or(self.peak_mb_s))
-                } else { format!("Sequential writes sustained {sustained:.1} MB/s (typical sample {:.1} MB/s).", self.peak_mb_s) });
+                } else { format!("Sequential writes sustained {sustained:.1} MB/s.") });
             } else if self.peak_mb_s > 0. { lines.push(format!("Write speed: {:.1} MB/s.", self.peak_mb_s)); }
             if self.write_pattern == "bursts with regular pauses" && !self.trim.starts_with("effective") {
                 lines.push("No distinct write-cache stretch was seen; the write cache may not have recovered since earlier writes.".into());

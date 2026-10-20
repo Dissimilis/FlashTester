@@ -434,6 +434,11 @@ pub struct RawDisk {
 }
 
 impl RawDisk {
+    /// A second handle for a worker thread, on the descriptor this one already holds.
+    pub fn worker(&self, write: bool) -> io::Result<File> {
+        crate::dev::io_handle(&self.file, write)
+    }
+
     pub fn open_restore(d: &DiskInfo) -> io::Result<RawDisk> { Self::open(d, true) }
 
     pub fn open_backup(_d: &DiskInfo) -> io::Result<RawDisk> {

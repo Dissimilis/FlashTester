@@ -32,6 +32,7 @@ enum Kind {
     Endurance,
     Verify,
     Probe,
+    Diagnose,
     Scan,
     Iops,
     SmallFiles,
@@ -108,6 +109,27 @@ mod operation_tests {
     }
 
     #[test]
+    fn diagnostics_is_raw_only_and_requires_the_confirmed_identity() {
+        use super::*;
+        assert!(Kind::for_target(true, false).contains(&Kind::Diagnose));
+        assert!(!Kind::for_target(false, false).contains(&Kind::Diagnose));
+        assert!(!Kind::for_target(true, true).contains(&Kind::Diagnose));
+        assert!(Kind::Diagnose.erases(true));
+        assert!(Kind::Diagnose.needs_admin(true));
+        let mut gui = Gui::new();
+        let disk = DiskInfo { id: "simulated".into(), instance_id: "original".into(), size: 4096, ..Default::default() };
+        gui.sel = Some(Sel::Disk(disk.id.clone()));
+        gui.disks = vec![disk.clone()];
+        let mut job = Job::Diagnose { disk, max_time: None };
+        assert!(job.destructive() && job.needs_admin() && !job.reads_disk_only());
+        assert!(!gui.confirmation_matches(&job));
+        gui.confirm = true;
+        assert!(gui.confirmation_matches(&job));
+        if let Job::Diagnose { disk, .. } = &mut job { disk.instance_id = "replacement".into(); }
+        assert!(!gui.confirmation_matches(&job));
+    }
+
+    #[test]
     fn disconnected_drive_keeps_its_completed_report() {
         use super::*;
         let mut gui = Gui::new();
@@ -134,6 +156,7 @@ impl Kind {
             Kind::Endurance => "Repeated write test",
             Kind::Verify => "Check saved test data",
             Kind::Probe => "Quick capacity check",
+            Kind::Diagnose => "Quick diagnostics",
             Kind::Scan => "Read scan",
             Kind::Iops => "Random 4 KiB speed",
             Kind::SmallFiles => "Small files",
@@ -151,6 +174,7 @@ impl Kind {
             Kind::Endurance => "Start repeated test",
             Kind::Verify => "Check test data",
             Kind::Probe => "Check capacity",
+            Kind::Diagnose => "Start diagnostics",
             Kind::Scan => "Start scan",
             Kind::Iops => "Start random I/O test",
             Kind::SmallFiles => "Start small file test",
@@ -164,6 +188,7 @@ impl Kind {
             Kind::Backup | Kind::Restore => "Backup and restore",
             Kind::Info => "Information",
             Kind::Scan => "Read checks",
+            Kind::Diagnose => "Recommended",
             Kind::Test | Kind::Probe | Kind::Verify => "Capacity and data loss",
             Kind::Bench | Kind::Iops => "Speed",
             Kind::Endurance | Kind::SmallFiles | Kind::PlugPull => "Reliability",
@@ -189,6 +214,7 @@ impl Kind {
                     "Check for false capacity using small blocks in free space. Needs root access. On a fake drive, writes can overwrite existing files."
                 }
             }
+            (Kind::Diagnose, _) => "Erase the whole disk, then check sampled capacity, write-cache behavior, speed, stalls and SMART. Usually 3 minutes on USB 2, 10 on USB/SD or SATA, 15 on NVMe. A full test is still needed to check every byte.",
             (Kind::Scan, _) => "Read every sector and mark unreadable or slow areas. Does not write to the disk.",
             (Kind::Iops, _) => "Measure random 4 KiB reads at queue depths 1 and 32. File mode also measures writes. Takes about 40 seconds.",
             (Kind::SmallFiles, _) => "Create, rename and delete small files, then check their names and contents. Reports errors and files per second.",
@@ -203,7 +229,7 @@ impl Kind {
         if protected {
             &[Kind::Info, Kind::Bench, Kind::Scan]
         } else if raw {
-            &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
+            &[Kind::Diagnose, Kind::Info, Kind::Backup, Kind::Restore, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
         } else if cfg!(target_os = "freebsd") {
             // No free-space probe on FreeBSD: it cannot map a file to disk blocks.
             &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Test, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
@@ -212,7 +238,7 @@ impl Kind {
         }
     }
     fn erases(self, raw: bool) -> bool {
-        raw && matches!(self, Kind::Test | Kind::Endurance | Kind::Probe | Kind::Fix | Kind::Restore)
+        raw && matches!(self, Kind::Test | Kind::Endurance | Kind::Probe | Kind::Fix | Kind::Restore | Kind::Diagnose)
     }
     fn needs_admin(self, raw: bool) -> bool {
         self != Kind::Info && (raw || self == Kind::Probe)
@@ -435,6 +461,10 @@ impl Gui {
             Kind::Endurance => Job::Test { w, o: opts(self.passes) },
             Kind::Verify => Job::Verify { w, h2w: false, manifest: None, loops: 1 },
             Kind::Probe => Job::Probe { w },
+            Kind::Diagnose => {
+                let Where::Disk(disk) = w else { return Err("Quick diagnostics needs a whole disk.".into()); };
+                Job::Diagnose { disk, max_time: None }
+            }
             Kind::Scan => Job::Scan { w, size },
             Kind::Iops => Job::Iops { w, secs: 8.0, write: false },
             Kind::SmallFiles => Job::SmallFiles { w, count: self.count, keep: false },
@@ -1058,10 +1088,13 @@ impl Gui {
     }
 
     fn test_row(&self, ui: &mut egui::Ui, kd: Kind, raw: bool) -> egui::Response {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+        // Quick diagnostics is the main choice for a whole disk: a taller, tinted card.
+        let main = kd == Kind::Diagnose;
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if main { 48.0 } else { 30.0 }), Sense::click());
         let on = self.kind == kd;
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, kd.name()));
-        let (fill, stroke, ring, dot) = k::row_colors(on, kd.erases(raw), resp.hovered(), Color32::TRANSPARENT, Color32::TRANSPARENT);
+        let (idle_fill, idle_stroke) = if main { (k::SEL, k::ACCENT) } else { (Color32::TRANSPARENT, Color32::TRANSPARENT) };
+        let (fill, stroke, ring, dot) = k::row_colors(on, kd.erases(raw), resp.hovered(), idle_fill, idle_stroke);
         let p = ui.painter();
         let cy = rect.center().y;
         p.rect(rect, 3.0, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
@@ -1074,12 +1107,18 @@ impl Gui {
             k::paint_icon(p, Rect::from_center_size(pos2(x - 6.5, cy), Vec2::splat(13.0)), Icon::Shield, k::WARN);
             x -= 21.0;
         }
-        if kd == Kind::Test && !self.protected() {
+        if kd == Kind::Test && !raw && !self.protected() {
             x = k::paint_medium(p, pos2(x, cy), Align2::RIGHT_CENTER, "Suggested", 11.0, k::LINK).left() - 8.0;
         }
         let left = rect.left() + 34.0;
-        let g = k::galley(ui, if raw && kd == Kind::Bench { "Read speed" } else { kd.name() }, FontId::proportional(14.0), x - left);
-        p.galley(pos2(left, cy - g.size().y / 2.0), g, if on { k::TEXT } else { k::TEXT2B });
+        let g = k::galley(ui, if raw && kd == Kind::Bench { "Read speed" } else { kd.name() }, FontId::proportional(if main { 15.0 } else { 14.0 }), x - left);
+        if main {
+            let sub = k::galley(ui, "Capacity, cache, speed and stalls in about 10 minutes", FontId::proportional(12.0), x - left);
+            p.galley(pos2(left, cy - g.size().y - 1.0), g, k::TEXT);
+            p.galley(pos2(left, cy + 1.0), sub, k::TEXT2);
+        } else {
+            p.galley(pos2(left, cy - g.size().y / 2.0), g, if on { k::TEXT } else { k::TEXT2B });
+        }
         k::pointer_on_hover(&resp);
         resp
     }
@@ -1592,6 +1631,11 @@ impl Gui {
         };
         self.slim_bar(ui);
         let mut act = self.verdict(ui, &rep);
+        if let Some(d) = &rep.diagnostics {
+            Frame::new().fill(k::BAR).corner_radius(4).inner_margin(10).show(ui, |ui| {
+                for line in d.summary_lines() { ui.add(Label::new(k::text(line, 13.0, k::TEXT2)).wrap()); }
+            });
+        }
         let cells = gui_map::from_report(&rep);
         let capacity = rep.probe.as_ref().map(|p| (p.usable.min(p.claimed), p.claimed));
         if !matches!(self.kind, Kind::Backup | Kind::Restore) {

@@ -142,6 +142,7 @@ On Linux use a mount point and a kernel name (`test /media/you/STICK`, `--disk s
 | `test --disk N --destroy` | Same over the whole disk (raw) | yes |
 | `endurance E: [--passes N]` | Write + verify again and again with new seeds (0 = until error / Ctrl+C) | raw only |
 | `verify E:` | Re-read data from an earlier test (retention). `--loops N` (0 = endless), `--h2w` for h2testw files | raw only |
+| `diagnose --disk N --destroy [--max-time 15m]` | Quick diagnostics: sampled capacity, cache behavior, speed, stalls and SMART | yes |
 | `probe --disk N --destroy` | Quick fake-capacity probe on the raw disk | yes |
 | `probe E:` | Quick probe inside free space (files are created, mapped to disk positions, and deleted) | yes |
 | `scan --disk N` | Read-only surface scan: unreadable and slow regions | yes |
@@ -158,6 +159,14 @@ Options for every command: `--json` (result on stdout), `--report file.html|file
 For `backup` and `restore`, report and evidence paths must be new files. This prevents a report from replacing a backup, its manifest or another existing file. Use a different report filename for each run. If saving a report fails, the command returns exit code 3 even when the backup or restore itself completed; the printed result shows both outcomes.
 
 **Exit codes:** 0 OK, 1 problem found (fake, defective, read-only, unreliable), 2 refused (protected operation, missing `--destroy`, not admin), 3 error, 130 cancelled.
+
+### Quick diagnostics
+
+Choose **Quick diagnostics** on a whole disk in the GUI, or run `flashtester diagnose --disk N --destroy`. This erases all files and partitions, including a whole-disk discard where supported. The default ceiling is 3 minutes on USB 2, 10 on USB/SD or SATA, and 15 on NVMe. `--max-time 900`, `--max-time 15m` and `--max-time 0.25h` set the same limit. Add `--json` or `--report result.html` to save the measurements.
+
+The run checks sampled capacity, watches sequential writes for a sustained slowdown, measures mixed small writes and random 4K I/O, and checks whether reads freeze during writes. When a slowdown appears, it tests recovery after idle and compares read speed and available temperatures. Failed writes, mismatches or SMART errors stop the run; speed warnings alone do not fail it.
+
+Sequential writes cover at most 40% of the disk; all test writes together cover at most 50% of distinct addresses. These caps do not make the operation safe for existing data: discard affects the whole disk. Cache size and recovery are estimates, qualified when TRIM is unavailable or heat may explain the slowdown. A blocked operating-system call can overrun the time limit. Use the full test to check every byte. Quick diagnostics has simulated-drive tests; its new discard and timing paths have not yet been validated on hardware.
 
 ### Flash identification
 

@@ -59,10 +59,21 @@ pub struct ProbeResult {
     pub module: Option<u64>,
     pub finding: Finding,
     pub seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u64>,
     pub examples: Vec<String>,
+    /// Diagnostics may finish before both passes. w = written but unchecked, ? = untouched.
+    #[serde(default)]
+    pub partial: bool,
+    /// Latest tag per point, including writes from an unfinished second pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub point_tags: Vec<Option<u64>>,
 }
 
 impl ProbeResult {
+    pub fn partial_summary(&self) -> String {
+        format!("Capacity probe partial: {} of {} points verified; the two-pass probe did not finish.", self.status.bytes().filter(|&s| s == b'o').count(), self.positions.len())
+    }
     pub fn summary_lines(&self) -> Vec<String> {
         let mut v = vec![format!(
             "Capacity probe ({}): {} positions every {} across {} claimed, 2 passes, {:.0} s.",
@@ -72,8 +83,11 @@ impl ProbeResult {
             size(self.claimed),
             self.seconds
         )];
+        if self.partial { v[0] = self.partial_summary(); }
         match self.finding {
+            Finding::Genuine if self.partial => v.push("No fault was found in the checked samples. Run a full test to check every byte.".into()),
             Finding::Genuine => v.push(format!("All sampled positions retained their data. Sampling interval: {}. Run a full test to check the space between them.", size(self.step))),
+            Finding::Fake if self.usable == 0 => v.push("Aliased data proves fake capacity; a usable-capacity estimate was not established. Run the standalone probe to measure the boundary.".into()),
             Finding::Fake => {
                 v.push(format!("Only about {} really stores data ({:.1}% of the claimed {}).", size(self.usable), self.usable as f64 * 100.0 / self.claimed.max(1) as f64, size(self.claimed)));
                 if let Some(m) = self.module {
@@ -95,6 +109,7 @@ impl ProbeResult {
             let cls = match c {
                 'o' => "p-ok",
                 'a' => "p-alias",
+                '?' | 'w' => "p-unknown",
                 _ => "p-bad",
             };
             s.push_str(&format!("<i class={cls} title=\"{}\"></i>", size(*p)));
@@ -128,8 +143,9 @@ enum Got {
 }
 
 /// Write the given positions in order with a fresh tag, flush, read them all back.
-fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx, label: &str) -> io::Result<Vec<Got>> {
-    let pat = Pattern::Seeded { tag: new_tag() };
+#[allow(clippy::too_many_arguments)]
+fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx, label: &str, tag: u64, strict: bool) -> io::Result<Vec<Got>> {
+    let pat = Pattern::Seeded { tag };
     let mut buf = AlignedBuf::new(block);
     let mut got = vec![Got::Ok; pos.len()];
     ctx.phase(&format!("{label}: writing"), order.len() as u64);
@@ -139,7 +155,7 @@ fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx
         }
         pat.fill(pos[i], &mut buf);
         if let Err(e) = dev.write_at(pos[i], &buf) {
-            if is_disconnect(&e) {
+            if strict || is_disconnect(&e) || e.kind() == io::ErrorKind::TimedOut {
                 return Err(e);
             }
             got[i] = Got::IoErr;
@@ -156,7 +172,7 @@ fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx
             continue;
         }
         got[i] = match dev.read_at(pos[i], &mut buf) {
-            Err(e) if is_disconnect(&e) => return Err(e),
+            Err(e) if strict || is_disconnect(&e) || e.kind() == io::ErrorKind::TimedOut => return Err(e),
             Err(_) => Got::IoErr,
             Ok(r) if r < block => Got::IoErr,
             Ok(_) => classify_block(pat, pos[i], &buf),
@@ -199,7 +215,7 @@ fn status_char(pos: u64, a: Got, b: Got) -> char {
 /// Time a few scattered writes; on drives with very slow random writes, keep
 /// every k-th grid position (k a power of two, so the grid stays a power-of-two
 /// grid) to finish both passes in about `budget_s` seconds.
-fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usize, budget_s: f64, ctx: &Ctx) -> io::Result<(Vec<u64>, u64)> {
+fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usize, budget_s: f64, strict: bool, ctx: &Ctx) -> io::Result<(Vec<u64>, u64)> {
     if positions.len() <= 64 {
         return Ok((positions, step));
     }
@@ -212,7 +228,9 @@ fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usiz
         let pos = positions[n * (2 * i + 1) / (2 * samples)];
         let t = Instant::now();
         // A fake may error past its real end: that is for the passes to classify.
-        if dev.write_at(pos, &buf).is_ok() && dev.read_at(pos, &mut buf).is_ok() {
+        let pair = dev.write_at(pos, &buf).and_then(|_| dev.read_at(pos, &mut buf));
+        if strict && let Err(e) = pair { return Err(e); }
+        if pair.is_ok() {
             times.push(t.elapsed().as_secs_f64());
         }
     }
@@ -239,18 +257,168 @@ fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usiz
 }
 
 pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode: &str, ctx: &Ctx) -> io::Result<ProbeResult> {
+    run_inner(dev, positions, step, claimed, mode, None, ctx)
+}
+
+/// Only this marker means a phase budget; an OS timeout remains an I/O error.
+#[derive(Debug)]
+pub(crate) struct Budget;
+impl std::fmt::Display for Budget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("phase budget reached") }
+}
+impl std::error::Error for Budget {}
+
+fn limited_write(dev: &mut dyn Dev, r: &mut ProbeResult, i: usize, tag: u64, buf: &mut [u8]) -> io::Result<()> {
+    Pattern::Seeded { tag }.fill(r.positions[i], buf);
+    dev.write_at(r.positions[i], buf)?;
+    r.point_tags[i] = Some(tag);
+    r.status.replace_range(i..i + 1, "w");
+    r.tag = Some(tag);
+    Ok(())
+}
+
+fn limited_read(dev: &mut dyn Dev, r: &mut ProbeResult, i: usize, buf: &mut [u8]) -> io::Result<bool> {
+    if dev.read_at(r.positions[i], buf)? != buf.len() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short probe read")); }
+    let got = classify_block(Pattern::Seeded { tag: r.point_tags[i].unwrap() }, r.positions[i], buf);
+    let c = match got { Got::Ok => "o", Got::Alias(_) => "a", Got::Stale => "s", _ => "x" };
+    r.status.replace_range(i..i + 1, c);
+    if got != Got::Ok {
+        r.bad += 1;
+        r.first_bad.get_or_insert(r.positions[i]);
+        if let Got::Alias(src) = got {
+            let distance = src.abs_diff(r.positions[i]);
+            r.module = Some(r.module.map_or(distance, |m| m.min(distance)));
+            r.finding = Finding::Fake;
+            if r.examples.len() < 5 { r.examples.push(format!("Position {} returned the data written to {}", size(r.positions[i]), size(src))); }
+        } else if r.finding != Finding::Fake {
+            r.finding = Finding::Defective;
+            r.usable = r.first_bad.unwrap();
+        }
+    }
+    Ok(got != Got::Ok)
+}
+
+fn thin_limited(r: &mut ProbeResult, step: u64, ctx: &Ctx) {
+    let last = *r.positions.last().unwrap();
+    let keep: Vec<_> = (0..r.positions.len()).filter(|&i| r.positions[i].is_multiple_of(step)
+        || r.positions[i] == last || r.point_tags[i].is_some()).collect();
+    r.positions = keep.iter().map(|&i| r.positions[i]).collect();
+    r.point_tags = keep.iter().map(|&i| r.point_tags[i]).collect();
+    r.status = keep.iter().map(|&i| r.status.as_bytes()[i] as char).collect();
+    r.step = step;
+    ctx.log(format!("Random writes are slow: probing {} points every {} within the remaining budget.", r.positions.len(), size(r.step)));
+}
+
+/// A bounded two-pass probe. Calibration and unfinished passes retain their tags;
+/// final verification can check every successful write without guessing its pattern.
+pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: f64, clock: &crate::engine::Clock, ctx: &Ctx) -> io::Result<ProbeResult> {
+    if positions.is_empty() { return Err(io::Error::other("no probe positions")); }
+    let started = clock.now();
+    let end = started + budget_s;
+    let ready = || {
+        if ctx.cancelled() { Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")) }
+        else if clock.now() >= end { Err(io::Error::new(io::ErrorKind::TimedOut, Budget)) } else { Ok(()) }
+    };
+    let block = BLOCK.max(dev.align());
+    let n = positions.len();
+    let mut r = ProbeResult { mode: "raw".into(), claimed: dev.len(), usable: dev.len(), step, block: block as u64,
+        positions, point_tags: vec![None; n], status: "?".repeat(n), partial: true, ..Default::default() };
+    let mut buf = AlignedBuf::new(block);
+    let mut read_pass_complete = false;
+    let result: io::Result<()> = (|| {
+        // Calibrate on the coarsest permitted grid, so thinning retains these writes.
+        let mut coarse = 1;
+        while (n - 1).div_ceil(coarse * 2) + 1 >= 16 { coarse *= 2; }
+        let indices: Vec<_> = (0..n).filter(|&i| r.positions[i].is_multiple_of(step * coarse as u64) || i == n - 1).collect();
+        let mut times = vec![];
+        let mut read_time: f64 = 0.;
+        let tag = new_tag();
+        for i in 0..indices.len().min(8) {
+            let index = indices[i * indices.len() / indices.len().min(8)];
+            ready()?;
+            let t = clock.now();
+            limited_write(dev, &mut r, index, tag, &mut buf)?;
+            ready()?;
+            let read_start = clock.now();
+            if limited_read(dev, &mut r, index, &mut buf)? { return Ok(()); }
+            read_time = read_time.max(clock.now() - read_start);
+            times.push(clock.now() - t);
+        }
+        times.sort_by(f64::total_cmp);
+        let pair = times[times.len() / 2].max(1e-9);
+        let max = ((end - clock.now()).max(0.) / (2. * pair)).floor().max(16.) as usize;
+        let mut k = 1;
+        while (n - 1).div_ceil(k) + 1 > max && k < coarse { k *= 2; }
+        if k > 1 { thin_limited(&mut r, step * k as u64, ctx); }
+        let mut write_time = (pair - read_time).max(1e-9);
+        for reverse in [false, true] {
+            read_pass_complete = false;
+            let tag = new_tag();
+            ctx.phase("Capacity probe: writing", r.positions.len() as u64);
+            loop {
+                let next = if reverse { r.point_tags.iter().rposition(|&t| t != Some(tag)) }
+                    else { r.point_tags.iter().position(|&t| t != Some(tag)) };
+                let Some(i) = next else { break; };
+                ready()?;
+                let t = clock.now();
+                limited_write(dev, &mut r, i, tag, &mut buf)?;
+                write_time = write_time.max(clock.now() - t);
+                // Cached calibration writes can hide slow flash. Refit both passes
+                // after each write, retaining off-grid writes and their exact tags.
+                if !reverse {
+                    while r.step < step * coarse as u64 {
+                        let left = r.point_tags.iter().filter(|&&t| t != Some(tag)).count();
+                        let needed = left as f64 * write_time + r.positions.len() as f64 * (write_time + 2. * read_time);
+                        if needed <= end - clock.now() { break; }
+                        let next_step = r.step * 2;
+                        thin_limited(&mut r, next_step, ctx);
+                        ctx.phase("Capacity probe: writing", r.positions.len() as u64);
+                    }
+                }
+                ctx.progress(r.point_tags.iter().filter(|&&t| t == Some(tag)).count() as u64);
+            }
+            let mut order: Vec<_> = (0..r.positions.len()).collect();
+            if reverse { order.reverse(); }
+            ready()?;
+            dev.flush()?;
+            ctx.phase("Capacity probe: reading", order.len() as u64);
+            for (j, &i) in order.iter().enumerate() {
+                ready()?;
+                limited_read(dev, &mut r, i, &mut buf)?;
+                ctx.progress(j as u64 + 1);
+            }
+            read_pass_complete = true;
+            if r.bad > 0 { return Ok(()); }
+        }
+        r.partial = false;
+        Ok(())
+    })();
+    if let Err(e) = result && !e.get_ref().is_some_and(|e| e.is::<Budget>()) { return Err(e); }
+    if r.finding == Finding::Fake {
+        // One alias can span many wraps. A partial read pass or a period at/below
+        // the grid spacing cannot safely supply a capacity for repartitioning.
+        r.module = r.module.filter(|m| read_pass_complete && *m > r.step && m.is_power_of_two());
+        r.usable = r.module.unwrap_or(0);
+    }
+    r.seconds = clock.now() - started;
+    Ok(r)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode: &str, budget: Option<f64>, ctx: &Ctx) -> io::Result<ProbeResult> {
     let t0 = Instant::now();
     if positions.is_empty() {
         return Err(io::Error::other("no probe positions (device or free space too small)"));
     }
     let block = BLOCK.max(dev.align());
-    let (positions, step) = thin_for_speed(dev, positions, step, block, 300.0, ctx)?;
+    let (positions, step) = thin_for_speed(dev, positions, step, block, budget.unwrap_or(300.0), budget.is_some(), ctx)?;
     let asc: Vec<usize> = (0..positions.len()).collect();
     let desc: Vec<usize> = asc.iter().rev().copied().collect();
-    let a = pass(dev, &positions, &asc, block, ctx, "Probe pass 1/2")?;
-    let b = pass(dev, &positions, &desc, block, ctx, "Probe pass 2/2")?;
+    let a = pass(dev, &positions, &asc, block, ctx, "Probe pass 1/2", new_tag(), budget.is_some())?;
+    let tag = new_tag();
+    let b = pass(dev, &positions, &desc, block, ctx, "Probe pass 2/2", tag, budget.is_some())?;
 
-    let mut r = ProbeResult { mode: mode.into(), claimed, step, block: block as u64, ..Default::default() };
+    let mut r = ProbeResult { mode: mode.into(), claimed, step, block: block as u64, tag: Some(tag), ..Default::default() };
     r.status = a.iter().zip(&b).enumerate().map(|(i, (&x, &y))| status_char(positions[i], x, y)).collect();
     for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
         for g in [x, y] {
@@ -267,12 +435,12 @@ pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode
     }
     // A wrap shorter than the grid step makes every grid point land on the same spot,
     // so the smallest visible distance is the step itself: look again, finer, below it.
-    while let Some(m) = r.module.filter(|&m| m <= step.max(r.step) && m > MIB) {
+    while let Some(m) = r.module.filter(|&m| budget.is_none() && m <= step.max(r.step) && m > MIB) {
         let (fine_step, fine) = grid(2 * m, block as u64, 1024);
         let asc: Vec<usize> = (0..fine.len()).collect();
         let desc: Vec<usize> = asc.iter().rev().copied().collect();
-        let fa = pass(dev, &fine, &asc, block, ctx, "Probe: narrowing the wraparound")?;
-        let fb = pass(dev, &fine, &desc, block, ctx, "Probe: narrowing the wraparound")?;
+        let fa = pass(dev, &fine, &asc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false)?;
+        let fb = pass(dev, &fine, &desc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false)?;
         let smaller = fa.iter().chain(&fb).zip(fine.iter().chain(&fine)).filter_map(|(g, &p)| if let Got::Alias(src) = g { Some(src.abs_diff(p)) } else { None }).filter(|&d| d > 0 && d < m).min();
         match smaller {
             Some(d) => {
@@ -301,7 +469,7 @@ pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode
             r.usable = m;
         } else if tail_bad && fb > 0 {
             r.finding = Finding::Fake;
-            r.usable = refine(dev, positions[fb - 1], positions[fb], block, ctx)?;
+            r.usable = if budget.is_some() { positions[fb] } else { refine(dev, positions[fb - 1], positions[fb], block, ctx)? };
         } else {
             r.finding = Finding::Defective;
             r.usable = positions[fb];
@@ -325,7 +493,7 @@ fn refine(dev: &mut dyn Dev, mut lo: u64, mut hi: u64, block: usize, ctx: &Ctx) 
         }
         let asc: Vec<usize> = (0..pts.len()).collect();
         let desc: Vec<usize> = asc.iter().rev().copied().collect();
-        let g = pass(dev, &pts, &desc, block, ctx, &format!("Refining boundary {round}/4"))?;
+        let g = pass(dev, &pts, &desc, block, ctx, &format!("Refining boundary {round}/4"), new_tag(), false)?;
         match g.iter().position(|&x| x != Got::Ok) {
             Some(0) => hi = pts[0],
             Some(i) => {
@@ -461,6 +629,58 @@ mod tests {
         let mut d = MemDev::new(real, claimed, mode);
         let (step, pos) = grid(claimed, BLOCK as u64, 256);
         run(&mut d, pos, step, claimed, "raw", &Ctx::new()).unwrap()
+    }
+
+    #[test]
+    fn cached_calibration_is_replaced_by_live_write_timing() {
+        struct SlowFlash {
+            clock: crate::engine::Clock,
+            data: std::collections::BTreeMap<u64, Vec<u8>>,
+            writes: Vec<u64>,
+            real: u64,
+            corrupt: bool,
+            cached_writes: usize,
+        }
+        impl Dev for SlowFlash {
+            fn len(&self) -> u64 { 62_000_000_000 }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+                self.clock.sleep(if self.writes.len() < self.cached_writes { 0.001 } else { 1. });
+                self.writes.push(off);
+                self.data.insert(off % self.real, buf.to_vec());
+                Ok(())
+            }
+            fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+                self.clock.sleep(0.001);
+                buf.copy_from_slice(self.data.get(&(off % self.real)).unwrap());
+                if self.corrupt && self.writes.len() > 8 && off == 0 { buf.fill(0); }
+                Ok(buf.len())
+            }
+        }
+        for (real, corrupt, cached_writes) in [(62_000_000_000, false, 8), (62_000_000_000, false, 16), (8 * GIB, false, 8), (MIB, false, 8), (62_000_000_000, true, 8)] {
+            let clock = crate::engine::Clock::simulated();
+            let mut d = SlowFlash { clock: clock.clone(), data: Default::default(), writes: vec![], real, corrupt, cached_writes };
+            let (step, points) = grid(d.len(), 4096, 1024);
+            assert!(points.len() > 900);
+            let p = run_limited(&mut d, points, step, 60., &clock, &Ctx::new()).unwrap();
+            assert!(p.seconds < 60.);
+            assert!(p.step.is_power_of_two() && p.step > step);
+            assert!((16..=32).contains(&p.positions.len()));
+            assert!(d.writes.iter().all(|off| p.positions.contains(off)), "lost an already-written point");
+            let (base, _) = grid(d.len(), 4096, 1024);
+            let expected: Vec<_> = (0..d.len().div_ceil(p.step)).map(|i| i * p.step).collect();
+            assert!(expected.iter().all(|off| p.positions.contains(off)));
+            assert!(p.step.is_multiple_of(base));
+            if real == d.len() && !corrupt {
+                assert!(!p.partial);
+                assert!(p.status.bytes().all(|c| c == b'o'));
+                assert!(p.positions.iter().all(|off| d.writes.iter().filter(|&p| p == off).count() >= 2));
+            } else {
+                assert_eq!(p.finding, if corrupt { Finding::Defective } else { Finding::Fake });
+                assert!(p.usable <= real);
+                if real <= p.step && !corrupt { assert_eq!(p.usable, 0); }
+            }
+        }
     }
 
     #[test]

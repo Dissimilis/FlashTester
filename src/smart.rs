@@ -359,6 +359,9 @@ fn parse_nvme(id: &[u8], log: &[u8], via: &str) -> Result<Smart, String> {
             s.alarms.push(format!("Critical warning: {msg}"));
         }
     }
+    if log[3] < log[4] && cw & 1 == 0 {
+        s.alarms.push("Available spare space is below the drive's threshold".into());
+    }
     let temp = kelvin(le16(log, 1));
     let unit = 512_000u64;
     let key = [
@@ -793,6 +796,15 @@ mod tests {
         assert_eq!(s.get(Counter::ThrottleSeconds), Some(35));
         assert_eq!(s.alarms.len(), 1);
         assert!(parse_nvme(&vec![0u8; 4096], &log, "NVMe").is_err());
+    }
+
+    #[test]
+    fn spare_below_threshold_is_an_alarm_even_without_the_warning_bit() {
+        let (id, mut log) = nvme_pages();
+        log[0] = 0;
+        log[3] = 4;
+        log[4] = 5;
+        assert_eq!(parse_nvme(&id, &log, "NVMe").unwrap().alarms.len(), 1);
     }
 
     #[test]

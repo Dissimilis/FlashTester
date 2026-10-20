@@ -8,6 +8,16 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::fs::File;
 use std::io;
+
+/// Validate before any discard ioctl, including on a handle opened read-only.
+fn discard_range(writable: bool, size: u64, sector: u32, off: u64, len: u64) -> io::Result<()> {
+    if !writable { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only")); }
+    let sector = u64::from(sector.max(512));
+    if len == 0 || !off.is_multiple_of(sector) || !len.is_multiple_of(sector) || off > size || len > size - off || size > i64::MAX as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "discard range is unaligned or outside the disk"));
+    }
+    Ok(())
+}
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -118,6 +128,9 @@ pub struct DiskInfo {
     pub serial: String,
     pub bus: String,
     pub removable: bool,
+    /// OS reports both non-rotating media and discard support; unknown on failure.
+    #[serde(default)]
+    pub ssd_hint: Option<bool>,
     pub size: u64,
     pub sector_size: u32,
     pub usb: Option<UsbInfo>,
@@ -587,5 +600,74 @@ mod tests {
     fn manifest_dir_is_private() {
         let m = std::fs::symlink_metadata(manifest_dir().unwrap()).unwrap();
         assert!(m.is_dir() && m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o077 == 0);
+    }
+}
+
+#[cfg(test)]
+mod discard_tests {
+    use super::*;
+    #[test]
+    fn discard_refuses_read_only_and_invalid_ranges() {
+        assert_eq!(discard_range(false, 8192, 512, 0, 8192).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        for (off, len) in [(0, 0), (1, 512), (0, 513), (8192, 512), (u64::MAX, 512)] {
+            assert!(discard_range(true, 8192, 512, off, len).is_err());
+        }
+        assert!(discard_range(true, 8192, 512, 0, 8192).is_ok());
+        assert!(discard_range(true, 8192, 4096, 512, 4096).is_err());
+    }
+}
+
+fn discard_error(e: io::Error) -> io::Error {
+    #[cfg(windows)]
+    let unsupported = matches!(e.raw_os_error(), Some(1 | 50));
+    #[cfg(unix)]
+    let unsupported = matches!(e.raw_os_error(), Some(libc::EOPNOTSUPP | libc::ENOTTY));
+    if unsupported { io::Error::new(io::ErrorKind::Unsupported, e) } else { e }
+}
+
+// Neither non-rotating media nor discard alone distinguishes a USB SSD from a stick.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd", test))]
+fn ssd_hint(nonrotating: Option<bool>, discard: Option<bool>) -> Option<bool> {
+    nonrotating.zip(discard).map(|(n, d)| n && d)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_ssd_hint(rotational: &str, discard_max_bytes: &str) -> Option<bool> {
+    let nonrotating = match rotational.trim() { "0" => Some(true), "1" => Some(false), _ => None };
+    ssd_hint(nonrotating, discard_max_bytes.trim().parse::<u64>().ok().map(|n| n > 0))
+}
+
+#[cfg(any(target_os = "freebsd", test))]
+fn freebsd_ssd_hint(rotationrate: &str, discard: Option<bool>, identify: &str) -> Option<bool> {
+    let rotation = identify.lines().find_map(|l| l.trim().strip_prefix("media RPM")).unwrap_or("");
+    let rotation = if rotationrate.is_empty() || rotationrate == "unknown" { rotation.trim() } else { rotationrate.trim() };
+    let nonrotating = match rotation {
+        "0" | "nonrotating" | "non-rotating" => Some(true),
+        _ => rotation.parse::<u32>().ok().filter(|n| (1025..=65534).contains(n)).map(|_| false),
+    };
+    let trim = identify.lines().find_map(|l| l.trim().strip_prefix("Data Set Management (DSM/TRIM)"))
+        .and_then(|s| match s.trim() { "yes" => Some(true), "no" => Some(false), _ => None });
+    ssd_hint(nonrotating, discard.or(trim))
+}
+
+#[cfg(test)]
+mod ssd_tests {
+    use super::*;
+    #[test]
+    fn both_signals_are_required_and_missing_data_stays_unknown() {
+        assert_eq!(linux_ssd_hint("0\n", "4294966784\n"), Some(true));
+        assert_eq!(linux_ssd_hint("0", "0"), Some(false));
+        assert_eq!(linux_ssd_hint("1", "512"), Some(false));
+        for (r, d) in [("", "512"), ("0", ""), ("bad", "512"), ("0", "-1")] { assert_eq!(linux_ssd_hint(r, d), None); }
+        assert_eq!(freebsd_ssd_hint("0", Some(true), ""), Some(true));
+        assert_eq!(freebsd_ssd_hint("nonrotating", Some(false), ""), Some(false));
+        let trim = "Data Set Management (DSM/TRIM) yes\n";
+        for r in ["0", "nonrotating"] { assert_eq!(freebsd_ssd_hint(r, None, trim), Some(true)); }
+        assert_eq!(freebsd_ssd_hint("7200", None, trim), Some(false));
+        assert_eq!(freebsd_ssd_hint("unknown", None, trim), None);
+        assert_eq!(freebsd_ssd_hint("1", None, trim), None); // GEOM prints 0, not ATA's raw 1.
+        assert_eq!(freebsd_ssd_hint("0", None, ""), None);
+        assert_eq!(freebsd_ssd_hint("0", None, "Data Set Management (DSM/TRIM) no"), Some(false));
+        assert_eq!(freebsd_ssd_hint("", None, &format!("media RPM             non-rotating\n{trim}")), Some(true));
     }
 }

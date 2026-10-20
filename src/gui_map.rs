@@ -200,6 +200,8 @@ pub fn from_report(r: &Report) -> Option<Vec<Cell>> {
         for (i, &(pos, st)) in probes.iter().enumerate() {
             let end = probes.get(i + 1).map(|x| x.0).unwrap_or(p.claimed);
             let (state, err) = match st {
+                b'?' => continue,
+                b'w' => (State::Written, None),
                 b'o' => (State::Verified, None),
                 b'a' => (State::Aliased, Some("holds another position's data")),
                 b's' => (State::Stale, Some("old data: the write was ignored")),

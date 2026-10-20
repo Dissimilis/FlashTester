@@ -25,6 +25,7 @@ pub enum Job {
     Test { w: Where, o: TestOpts },
     Verify { w: Where, h2w: bool, manifest: Option<PathBuf>, loops: u32 },
     Probe { w: Where },
+    Diagnose { disk: DiskInfo, max_time: Option<f64> },
     /// `size`: scan only the first part of the disk.
     Scan { w: Where, size: Option<u64> },
     Iops { w: Where, secs: f64, write: bool },
@@ -38,7 +39,7 @@ pub enum Job {
 impl Job {
     pub fn disk(&self) -> Option<&DiskInfo> {
         match self {
-            Job::Fix { disk, .. } => Some(disk),
+            Job::Fix { disk, .. } | Job::Diagnose { disk, .. } => Some(disk),
             Job::Backup { w, .. } | Job::Restore { w, .. }
             | Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w }
             | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::SmallFiles { w, .. }
@@ -57,8 +58,9 @@ impl Job {
         if let Job::Iops { secs, .. } = self {
             crate::perf::iops_duration(*secs).map_err(|e| e.to_string())?;
         }
+        if let Job::Diagnose { max_time: Some(secs), .. } = self { crate::diagnose::check_time(*secs)?; }
         let w = match self {
-            Job::Fix { disk, .. } => {
+            Job::Fix { disk, .. } | Job::Diagnose { disk, .. } => {
                 return disk.check_identity(&platform::check_disk(&disk.id)?);
             }
             Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w }
@@ -84,7 +86,7 @@ impl Job {
         match self {
             Job::Test { w, .. } | Job::Probe { w } => matches!(w, Where::Disk(_)),
             Job::Iops { w, write, .. } | Job::Bench { w, write, .. } => *write && matches!(w, Where::Disk(_)),
-            Job::Fix { .. } => true,
+            Job::Fix { .. } | Job::Diagnose { .. } => true,
             Job::Restore { w, .. } => matches!(w, Where::Disk(_)),
             _ => false,
         }
@@ -92,7 +94,7 @@ impl Job {
     pub fn needs_admin(&self) -> bool {
         match self {
             Job::Test { w, .. } | Job::Verify { w, .. } | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::Bench { w, .. } => matches!(w, Where::Disk(_)),
-            Job::Probe { .. } | Job::Fix { .. } => true,
+            Job::Probe { .. } | Job::Fix { .. } | Job::Diagnose { .. } => true,
             Job::SmallFiles { .. } | Job::PlugPull { .. } => false,
             Job::Backup { w, .. } | Job::Restore { w, .. } => matches!(w, Where::Disk(_)),
         }
@@ -150,6 +152,7 @@ fn refused_job(job: &Job, msg: String) -> Report {
         Job::Test { w, .. } => ("test", w.target()),
         Job::Verify { w, .. } => ("verify", w.target()),
         Job::Probe { w } => ("probe", w.target()),
+        Job::Diagnose { disk, .. } => ("diagnose", Where::Disk(disk.clone()).target()),
         Job::Scan { w, .. } => ("scan", w.target()),
         Job::Iops { w, .. } => ("iops", w.target()),
         Job::SmallFiles { w, .. } => ("small-files", w.target()),
@@ -172,6 +175,7 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
         return refused_job(job, "This operation requires administrator or root access. Restart FlashTester with those permissions.".into());
     }
     let t0 = Instant::now();
+    let started = crate::engine::now();
     let _awake = platform::KeepAwake::new();
     let watch = smart_disk(job).filter(|_| platform::is_admin()).and_then(|d| crate::smart::Watch::start(&d, ctx));
     let mut rep = match job {
@@ -180,6 +184,15 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
         Job::Test { w, o } => fulltest::run_test(w, o, ctx),
         Job::Verify { w, h2w, manifest, loops } => verify(w, *h2w, manifest.as_deref(), *loops, ctx),
         Job::Probe { w } => run_probe(w, ctx),
+        Job::Diagnose { disk, max_time } => match RawDisk::open(disk, true) {
+            Ok(mut dev) => crate::diagnose::report(disk, crate::diagnose::run_disk(&mut dev, disk, *max_time, ctx)),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => refused_job(job, format!("Cannot open disk for diagnostics: {e}")),
+            Err(e) => {
+                let mut r = Report::new("diagnose", Where::Disk(disk.clone()).target());
+                r.set(Status::Unreliable, format!("Problems found: cannot open the selected disk: {e}"));
+                r
+            }
+        },
         Job::Scan { w, size } => scan(w, *size, ctx),
         Job::Iops { w, secs, write } => iops(w, *secs, *write, ctx),
         Job::SmallFiles { w, count, keep } => small_files(w, *count, *keep, ctx),
@@ -187,6 +200,7 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
         Job::Bench { w, size, write } => bench(w, *size, *write, ctx),
         Job::Fix { disk, size, fs, label } => fix(disk, size, fs, label, ctx),
     };
+    if matches!(job, Job::Diagnose { .. }) { rep.started = started; }
     if let Some(w) = watch {
         w.finish(&mut rep);
     }
@@ -205,7 +219,7 @@ pub fn run(job: &Job, ctx: &Ctx) -> Report {
 fn smart_disk(job: &Job) -> Option<DiskInfo> {
     let w = match job {
         Job::Test { w, .. } | Job::Verify { w, .. } | Job::Probe { w } | Job::Scan { w, .. } | Job::Iops { w, .. } | Job::SmallFiles { w, .. } | Job::Bench { w, .. } => w,
-        Job::PlugPull { .. } | Job::Fix { .. } | Job::Backup { .. } | Job::Restore { .. } => return None,
+        Job::PlugPull { .. } | Job::Fix { .. } | Job::Diagnose { .. } | Job::Backup { .. } | Job::Restore { .. } => return None,
     };
     match w {
         Where::Disk(d) => Some(d.clone()),
@@ -368,7 +382,7 @@ fn iops(w: &Where, secs: f64, write: bool, ctx: &Ctx) -> Report {
             // Writing holds the volume locks for the duration.
             let raw = RawDisk::open(d, write)?;
             // Every worker stays on this checked device even if its name is reused.
-            let r = crate::perf::run_iops(&|wr| crate::dev::io_handle(&raw.file, wr), raw.size, write, secs, ctx);
+            let r = crate::perf::run_iops(&|wr| raw.worker(wr), raw.size, write, secs, ctx);
             drop(raw);
             r
         })(),

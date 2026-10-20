@@ -179,3 +179,25 @@ fn hidden_serials_remove_whole_device_ids_and_spare_short_numbers() {
     report.hide_serials();
     assert!(report.html().contains("Serial numbers are hidden in this report."));
 }
+
+#[test]
+fn hidden_serials_cover_quick_diagnostics() {
+    use flashtester::platform::DiskInfo;
+    let disk = DiskInfo { serial: "AA11BB22CC33".into(), ..Default::default() };
+    let change = "Drive identity changed: Serial changed from 'AA11BB22CC33' to 'DD44EE55FF66'";
+    let d = flashtester::diagnose::Diagnostics {
+        reason: change.into(),
+        warnings: vec!["Check the serial number AA11BB22CC33 with the seller.".into()],
+        identity_changes: vec![change.into()],
+        ..Default::default()
+    };
+    let mut report = flashtester::diagnose::report(&disk, d);
+    report.target.disk.as_mut().unwrap().serial = "AA11BB22CC33".into();
+    report.hide_serials();
+    let json = serde_json::to_string(&report).unwrap();
+    for out in [report.html(), report.evidence_html(), report.text(), json] {
+        for secret in ["AA11BB22CC33", "DD44EE55FF66"] {
+            assert!(!out.contains(secret), "{secret} left in output");
+        }
+    }
+}

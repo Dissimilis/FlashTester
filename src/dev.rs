@@ -190,6 +190,17 @@ pub trait Dev: Send {
     /// Reads up to `buf.len()`; returns bytes read (short only at the end of data).
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize>;
     fn flush(&mut self) -> io::Result<()>;
+    /// Independent handle to the same opened device, never a fresh path lookup.
+    fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "independent handles unavailable"))
+    }
+    /// Maximum discard request accepted by the OS, when known.
+    fn discard_max_bytes(&self) -> Option<u64> { None }
+    fn discard(&mut self, _off: u64, _len: u64) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "discard unavailable"))
+    }
+    /// Smallest addressable sector (buffers may require stricter alignment).
+    fn sector_size(&self) -> usize { self.align() }
     /// Granularity reads and writes must be aligned to.
     fn align(&self) -> usize {
         ALIGN
@@ -199,6 +210,27 @@ pub trait Dev: Send {
     fn usable(&self, _off: u64, _len: u64) -> bool {
         true
     }
+}
+
+/// Worker handle; the owner keeps the raw disk's locks alive until workers join.
+pub struct IoHandle {
+    pub file: File,
+    pub size: u64,
+    pub alignment: usize,
+    pub writable: bool,
+}
+
+impl Dev for IoHandle {
+    fn len(&self) -> u64 { self.size }
+    fn align(&self) -> usize { self.alignment }
+    fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+        if !self.writable { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only handle")); }
+        if off > self.size || buf.len() as u64 > self.size - off { return Err(io::Error::other("write outside device")); }
+        if pwrite(&self.file, buf, off)? != buf.len() { return Err(io::Error::new(io::ErrorKind::WriteZero, "short write")); }
+        Ok(())
+    }
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> { pread(&self.file, buf, off) }
+    fn flush(&mut self) -> io::Result<()> { if self.writable { self.file.sync_all() } else { Ok(()) } }
 }
 
 /// Test files `00001.ftd`, `00002.ftd`, ... of `FILE_SIZE` bytes each, opened unbuffered.
@@ -321,6 +353,8 @@ pub enum SimMode {
     Genuine,
     /// Addresses wrap modulo the real size (address bits ignored).
     Wrap,
+    /// A prefix is real; later addresses wrap through the remaining storage.
+    Ring { prefix: u64 },
     /// Writes beyond the real size are dropped; reads return zeros.
     Drop,
     /// Every write is silently ignored.
@@ -335,6 +369,7 @@ impl MemDev {
         let real = self.data.len() as u64;
         match self.mode {
             SimMode::Wrap => Some((off % real) as usize),
+            SimMode::Ring { prefix } if off >= prefix => Some((prefix + (off - prefix) % (real - prefix)) as usize),
             _ if off < real => Some(off as usize),
             _ => None,
         }
@@ -342,6 +377,7 @@ impl MemDev {
 }
 
 impl Dev for MemDev {
+    fn sector_size(&self) -> usize { 512 }
     fn len(&self) -> u64 {
         self.claimed
     }
@@ -366,6 +402,67 @@ impl Dev for MemDev {
         Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct CacheDev {
+    pub state: std::sync::Arc<std::sync::Mutex<CacheState>>,
+    pub clock: crate::engine::Clock,
+}
+
+#[cfg(test)]
+pub struct CacheState {
+    pub disk: MemDev,
+    pub cache: u64,
+    pub available: f64,
+    pub fast: f64,
+    pub slow: f64,
+    pub refill: f64,
+    pub last: f64,
+    pub written: u64,
+    pub trim: bool,
+}
+
+#[cfg(test)]
+impl CacheDev {
+    pub fn new(real: u64, claimed: u64, mode: SimMode, cache: u64, fast: f64, slow: f64) -> Self {
+        Self { clock: crate::engine::Clock::simulated(), state: std::sync::Arc::new(std::sync::Mutex::new(CacheState {
+            disk: MemDev::new(real, claimed, mode), cache, available: cache as f64, fast, slow, refill: cache as f64 / 3.0, last: 0.0, written: 0, trim: true,
+        })) }
+    }
+}
+
+#[cfg(test)]
+impl Dev for CacheDev {
+    fn sector_size(&self) -> usize { 512 }
+    fn len(&self) -> u64 { self.state.lock().unwrap().disk.len() }
+    fn fork(&mut self) -> io::Result<Box<dyn Dev>> { Ok(Box::new(self.clone())) }
+    fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+        let mut s = self.state.lock().unwrap();
+        let idle = (self.clock.now() - s.last).max(0.0);
+        s.available = (s.available + idle * s.refill).min(s.cache as f64);
+        let fast = s.available.min(buf.len() as f64);
+        self.clock.sleep((fast / s.fast + (buf.len() as f64 - fast) / s.slow).max(0.000001));
+        s.available -= fast;
+        s.last = self.clock.now();
+        s.written += buf.len() as u64;
+        s.disk.write_at(off, buf)
+    }
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let mut s = self.state.lock().unwrap();
+        self.clock.sleep((buf.len() as f64 / (4 * MIB) as f64).max(0.000001));
+        s.disk.read_at(off, buf)
+    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
+        let mut s = self.state.lock().unwrap();
+        if !s.trim { return Err(io::Error::new(io::ErrorKind::Unsupported, "no trim")); }
+        let end = (off + len).min(s.disk.data.len() as u64) as usize;
+        if (off as usize) < end { s.disk.data[off as usize..end].fill(0); }
+        s.available = s.cache as f64;
         Ok(())
     }
 }

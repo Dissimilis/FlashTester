@@ -520,6 +520,18 @@ fn partitions(mesh: &Mesh, disk_id: &str) -> Vec<String> {
     v.into_iter().map(|x| x.1).collect()
 }
 
+fn can_discard(path: &str) -> Option<bool> {
+    // DIOCGATTR, GEOM::candelete. Read metadata only, independent of ATA passthrough.
+    #[repr(C)]
+    struct Attr { name: [u8; 64], len: i32, value: [u64; 32] }
+    let mut a = Attr { name: [0; 64], len: 4, value: [0; 32] };
+    a.name[..15].copy_from_slice(b"GEOM::candelete\0");
+    let f = File::open(path).ok()?;
+    let code = 0xc000_648eu64 | ((std::mem::size_of::<Attr>() as u64) << 16);
+    if unsafe { libc::ioctl(f.as_raw_fd(), code as _, &mut a) } != 0 { return None; }
+    match a.value[0] as u32 { 0 => Some(false), 1 => Some(true), _ => None }
+}
+
 fn disk_info(mesh: &Mesh, id: &str, cams: &HashMap<String, Cam>, ms: &[Mount], chains: &[Vec<String>]) -> DiskInfo {
     let p = &mesh.provs[id];
     let name = p.name.clone();
@@ -542,6 +554,13 @@ fn disk_info(mesh: &Mesh, id: &str, cams: &HashMap<String, Cam>, ms: &[Mount], c
         d.product = "Virtio disk".into();
     }
     if d.bus == "USB" {
+        let rotation = p.cfg.get("rotationrate").map_or("", String::as_str);
+        let discard = can_discard(&d.path);
+        d.ssd_hint = super::freebsd_ssd_hint(rotation, discard, "");
+        if d.ssd_hint.is_none() {
+            let identify = output("camcontrol", &["identify", &name]).unwrap_or_default();
+            d.ssd_hint = super::freebsd_ssd_hint(rotation, discard, &identify);
+        }
         d.usb = c.and_then(|c| usb_info(&c.sim));
         if let Some(u) = &d.usb {
             // The device address changes on every replug.
@@ -660,6 +679,11 @@ pub struct RawDisk {
 }
 
 impl RawDisk {
+    /// A second handle for a worker thread, on the descriptor this one already holds.
+    pub fn worker(&self, write: bool) -> io::Result<File> {
+        crate::dev::io_handle(&self.file, write)
+    }
+
     pub fn open_restore(d: &DiskInfo) -> io::Result<RawDisk> { Self::open(d, true) }
 
     pub fn open_backup(d: &DiskInfo) -> io::Result<RawDisk> {
@@ -698,6 +722,17 @@ impl RawDisk {
 }
 
 impl Dev for RawDisk {
+    fn sector_size(&self) -> usize { self.sector as usize }
+    fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
+        Ok(Box::new(crate::dev::IoHandle { file: self.worker(self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
+    }
+    fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
+        super::discard_range(self.writable, self.size, self.sector, off, len)?;
+        let range = [off, len];
+        // DIOCGDELETE: _IOW('d', 136, off_t[2])
+        if unsafe { libc::ioctl(self.file.as_raw_fd(), 0x8010_6488u64 as _, range.as_ptr()) } != 0 { return Err(super::discard_error(io::Error::last_os_error())); }
+        Ok(())
+    }
     fn len(&self) -> u64 {
         self.size
     }

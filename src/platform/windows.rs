@@ -425,6 +425,35 @@ fn nvme_pci(disk_devinst: u32) -> Option<String> {
     None
 }
 
+// Seek-penalty and TRIM descriptors both have Version, Size, then a BOOLEAN.
+fn storage_bool_descriptor(bytes: &[u8]) -> Option<bool> {
+    if bytes.len() < 12 || u32_at(bytes, 0) < 12 || u32_at(bytes, 4) < 12 { return None; }
+    match bytes[8] { 0 => Some(false), 1 => Some(true), _ => None }
+}
+
+fn storage_bool(f: &File, property: u32) -> Option<bool> {
+    let mut query = [0u8; 12]; // PropertyStandardQuery
+    query[..4].copy_from_slice(&property.to_le_bytes());
+    let mut desc = [0u8; 12];
+    let n = ioctl(f, IOCTL_STORAGE_QUERY_PROPERTY, &query, &mut desc).ok()?;
+    storage_bool_descriptor(desc.get(..n)?)
+}
+
+#[test]
+fn storage_boolean_properties_reject_missing_or_truncated_descriptors() {
+    let mut desc = [0u8; 12];
+    assert_eq!(storage_bool_descriptor(&desc), None);
+    desc[..4].copy_from_slice(&12u32.to_le_bytes());
+    desc[4..8].copy_from_slice(&12u32.to_le_bytes());
+    assert_eq!(storage_bool_descriptor(&desc), Some(false));
+    desc[8] = 1;
+    assert_eq!(storage_bool_descriptor(&desc), Some(true));
+    assert_eq!(storage_bool_descriptor(&desc[..8]), None);
+    assert_eq!(super::ssd_hint(storage_bool_descriptor(&desc).map(|seek| !seek), Some(true)), Some(false));
+    desc[8] = 0;
+    assert_eq!(super::ssd_hint(storage_bool_descriptor(&desc).map(|seek| !seek), Some(true)), Some(true));
+}
+
 fn disk_details(path: &str, devinst: u32) -> io::Result<DiskInfo> {
     let f = open_dev(path, 0)?;
     let mut num = [0u8; 12];
@@ -447,6 +476,8 @@ fn disk_details(path: &str, devinst: u32) -> io::Result<DiskInfo> {
         d.size = u64_at(&g, 24);
     }
     if d.bus == "USB" {
+        // StorageDeviceSeekPenaltyProperty (7), StorageDeviceTrimProperty (8).
+        d.ssd_hint = super::ssd_hint(storage_bool(&f, 7).map(|seek| !seek), storage_bool(&f, 8));
         d.usb = usb_info(devinst);
         d.controller = d.usb.as_ref().map(|u| crate::ids::usb_controller_hint(&u.vid, &u.pid)).unwrap_or_default();
     }
@@ -557,6 +588,34 @@ impl RawDisk {
         }
         Ok(RawDisk { file: f, size: u64::from_le_bytes(len), sector: d.sector_size.max(512), id: d.id.clone(), writable: write, _locks: locks, wrote: false })
     }
+
+    /// A second handle for a worker thread. ReOpenFile rejects disk handles (error 87),
+    /// so open the path again and check that it reaches the device this handle holds.
+    pub fn worker(&self, write: bool) -> io::Result<File> {
+        if write && !self.writable {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "disk was opened read-only"));
+        }
+        let f = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .share_mode(3)
+            .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH)
+            .open(format!("\\\\.\\PhysicalDrive{}", self.id))?;
+        let identity = |f: &File| -> io::Result<(Vec<u8>, Vec<u8>, u64)> {
+            let mut num = vec![0u8; 12];
+            ioctl(f, IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut num)?;
+            let mut desc = vec![0u8; 1024]; // StorageDeviceProperty: vendor, product, serial
+            let n = ioctl(f, IOCTL_STORAGE_QUERY_PROPERTY, &[0u8; 12], &mut desc)?;
+            desc.truncate(n);
+            let mut len = [0u8; 8];
+            ioctl(f, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut len)?;
+            Ok((num, desc, u64::from_le_bytes(len)))
+        };
+        if identity(&f)? != identity(&self.file)? {
+            return Err(io::Error::other("the disk changed while the test was running"));
+        }
+        Ok(f)
+    }
 }
 
 fn lock_volume(v: &VolumeInfo) -> io::Result<File> {
@@ -588,6 +647,24 @@ impl Drop for RawDisk {
 }
 
 impl Dev for RawDisk {
+    fn sector_size(&self) -> usize { self.sector as usize }
+    fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
+        self.wrote |= self.writable;
+        Ok(Box::new(crate::dev::IoHandle { file: self.worker(self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
+    }
+    fn discard(&mut self, off: u64, len: u64) -> io::Result<()> {
+        super::discard_range(self.writable, self.size, self.sector, off, len)?;
+        self.wrote = true;
+        // DSM header is 28 bytes; its 16-byte range starts on an 8-byte boundary.
+        let mut input = [0u8; 48];
+        input[0..4].copy_from_slice(&28u32.to_le_bytes());
+        input[4..8].copy_from_slice(&1u32.to_le_bytes()); // DeviceDsmAction_Trim
+        input[20..24].copy_from_slice(&32u32.to_le_bytes());
+        input[24..28].copy_from_slice(&16u32.to_le_bytes());
+        input[32..40].copy_from_slice(&off.to_le_bytes());
+        input[40..48].copy_from_slice(&len.to_le_bytes());
+        ioctl(&self.file, 0x002D_9404, &input, &mut []).map(|_| ()).map_err(super::discard_error)
+    }
     fn len(&self) -> u64 {
         self.size
     }
@@ -645,6 +722,8 @@ mod read_only_tests {
         let mut raw = RawDisk { file, size: 4096, sector: 512, id: "fixture".into(), writable: false, _locks: vec![], wrote: false };
         let error = raw.write_at(0, &[42; 512]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!raw.wrote);
+        assert_eq!(raw.discard(0, 4096).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert!(!raw.wrote);
         raw.flush().unwrap();
         let mut data = [1; 512];

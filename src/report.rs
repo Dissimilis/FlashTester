@@ -137,6 +137,8 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub probe: Option<ProbeResult>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub diagnostics: Option<crate::diagnose::Diagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub scan: Option<ScanResult>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub iops: Option<IopsResult>,
@@ -173,14 +175,14 @@ impl Report {
     fn identity_warnings(&mut self) {
         if let Some(d) = &self.target.disk {
             if let Some(u) = &d.usb
-                && u.slow_link {
+                && u.slow_link && self.command != "diagnose" {
                     let cap = if u.superspeed_capable == Some(true) { " The drive supports USB 3; try a USB 3 port, cable or reader." } else { "" };
                     self.warnings.push(format!(
                         "Connected at {}. The USB link limits transfer speed.{cap}",
                         u.link
                     ));
                 }
-            if let Some(u) = d.usb.as_ref().filter(|u| u.superspeed_plus_capable == Some(true) && !u.link.contains("SuperSpeed+")) {
+            if let Some(u) = d.usb.as_ref().filter(|u| self.command != "diagnose" && u.superspeed_plus_capable == Some(true) && !u.link.contains("SuperSpeed+")) {
                 self.warnings.push(format!(
                     "Connected at {}. The drive supports 10 Gbit/s USB. Use a compatible 10 Gbit/s port and cable for a faster link.",
                     u.link
@@ -234,10 +236,16 @@ impl Report {
         }
         self.warnings.iter_mut().chain(&mut self.notes).chain(&mut self.verdict.details).chain([&mut self.verdict.headline]).for_each(&scrub);
         // "Serial changed from 'A' to 'B'": the new serial is not in the report to match.
-        for c in &mut self.identity_changes {
-            if c.starts_with("Serial changed") || c.starts_with("USB serial changed") {
-                c.truncate(c.find(" from ").unwrap_or(c.len()));
+        // Quick diagnostics quotes such changes inside its own messages too.
+        let cut = |c: &mut String| {
+            if let Some(i) = c.find("erial changed") {
+                c.truncate(i + "erial changed".len());
             }
+        };
+        self.identity_changes.iter_mut().chain(&mut self.verdict.details).chain([&mut self.verdict.headline]).for_each(cut);
+        if let Some(d) = &mut self.diagnostics {
+            d.warnings.iter_mut().chain([&mut d.reason]).for_each(&scrub);
+            d.identity_changes.iter_mut().chain([&mut d.reason]).for_each(cut);
         }
     }
 
@@ -268,6 +276,15 @@ impl Report {
         let _ = writeln!(s, "Verdict: {} - {}", self.verdict.status.label(), self.verdict.headline);
         for d in &self.verdict.details {
             let _ = writeln!(s, "  {d}");
+        }
+        if let Some(d) = &self.diagnostics {
+            let _ = writeln!(s, "\nQuick diagnostics:");
+            for line in d.summary_lines() { let _ = writeln!(s, "  {line}"); }
+            let _ = writeln!(s, "\nPhase                       Time     Median ms   p99 ms   Worst ms");
+            for p in &d.phases { let _ = writeln!(s, "{:<27} {:>7.1}s {:>10.2} {:>8.2} {:>10.2}", p.name, p.seconds, p.median_ms, p.p99_ms, p.worst_ms); }
+            for z in &d.zones { let _ = writeln!(s, "{}: {} verified in {}..{}; 4K read {} ms", z.name, size(z.verified), size(z.start), size(z.end), z.read_4k_ms.map(|v| format!("{v:.2}")).unwrap_or_else(|| "not measured".into())); }
+            let _ = writeln!(s, "Verification reads: {} intact sectors, {} mismatches (repeated reads included).", d.tally.ok, d.tally.lost());
+            for stall in &d.stalls { let _ = writeln!(s, "Stall: {} at {}, {:.2} s into the run, blocked {:.2} s{}", stall.phase, stall.offset.map(size).unwrap_or_else(|| "no disk position".into()), stall.at, stall.seconds, if stall.write_path { "; read-back was fast and correct" } else { "" }); }
         }
         if let Some(p) = &self.probe {
             let _ = writeln!(s);
@@ -432,7 +449,9 @@ fn esc(s: &str) -> String {
 }
 
 /// Inline SVG line chart of MB/s by position.
-fn speed_svg(series: &[(&str, &str, &IoStats)]) -> String {
+fn speed_svg(series: &[(&str, &str, &IoStats)]) -> String { speed_svg_marked(series, None) }
+
+fn speed_svg_marked(series: &[(&str, &str, &IoStats)], drop: Option<u64>) -> String {
     let (w, h, pad) = (760.0, 220.0, 40.0);
     let maxx = series.iter().flat_map(|s| s.2.speed_map.iter().map(|p| p.pos)).max().unwrap_or(1).max(1) as f64;
     let maxy = series.iter().flat_map(|s| s.2.speed_map.iter().map(|p| p.mb_s)).fold(1.0, f64::max) * 1.1;
@@ -469,9 +488,39 @@ fn speed_svg(series: &[(&str, &str, &IoStats)]) -> String {
             .collect();
         let _ = write!(s, r#"<polyline fill="none" stroke="{color}" stroke-width="2" points="{}"><title>{name}</title></polyline>"#, pts.join(" "));
     }
+    if let Some(pos) = drop {
+        let x = pad + (w - pad - 10.) * (pos as f64 / maxx).min(1.);
+        let _ = write!(s, r##"<line x1="{x:.1}" x2="{x:.1}" y1="20" y2="180" stroke="#c62828" stroke-dasharray="4 3"><title>Write slowdown near {}</title></line><text x="{:.1}" y="16" class="lbl">drop</text>"##, size(pos), x.min(w - 40.));
+    }
     s.push_str("</svg>");
     let legend: Vec<String> = series.iter().map(|(n, c, _)| format!(r#"<span style="color:{c}">&#9644; {n}</span>"#)).collect();
     format!("{s}<div class=\"legend\">{}. MB/s by position</div>", legend.join(" "))
+}
+
+fn diagnostics_html(d: &crate::diagnose::Diagnostics) -> String {
+    let mut b = String::from("<section><h2>Quick diagnostics</h2><div class=card><ul>");
+    for line in d.summary_lines() { let _ = write!(b, "<li>{}</li>", esc(&line)); }
+    b.push_str("</ul></div>");
+    if !d.samples.is_empty() {
+        let mut stats = IoStats::default();
+        stats.speed_map.extend(d.samples.iter().map(|s| crate::engine::MapPoint { pos: s.offset, mb_s: s.mb_s, ..Default::default() }));
+        b.push_str(&speed_svg_marked(&[("write", "#2f81f7", &stats)], d.drop_at));
+        b.push_str("<p class=mut>Write-active time excludes deliberate read pauses; stalls remain in the measured throughput. The marker is the estimated onset, confirmed only after sustained slowdown.</p>");
+    }
+    b.push_str("<h2>Diagnostic phases</h2><table><tr><th>Phase</th><th>Time</th><th>I/Os</th><th>Median ms</th><th>p99 ms</th><th>Worst ms</th></tr>");
+    for p in &d.phases { let _ = write!(b, "<tr><td>{}</td><td>{:.1} s</td><td>{}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td></tr>", esc(&p.name), p.seconds, p.operations, p.median_ms, p.p99_ms, p.worst_ms); }
+    b.push_str("</table><h2>Sampled verification</h2><table><tr><th>Zone</th><th>Range</th><th>Verified</th><th>4K read ms</th></tr>");
+    for z in &d.zones { let _ = write!(b, "<tr><td>{}</td><td>{} to {}</td><td>{}</td><td>{}</td></tr>", esc(&z.name), size(z.start), size(z.end), size(z.verified), z.read_4k_ms.map(|v| format!("{v:.2}")).unwrap_or_else(|| "not measured".into())); }
+    let _ = write!(b, "</table><p>{} intact sectors, {} mismatches across verification reads (includes repeated reads). Distinct written bytes: at most {}.</p>", d.tally.ok, d.tally.lost(), size(d.distinct_upper_bound));
+    if let Some(e) = &d.tally.first_error { let _ = write!(b, "<p>First mismatch at {} (0x{:x}).</p>", size(e.offset), e.offset); }
+    let _ = write!(b, "<h2>Stalls</h2><p>{}</p>", esc(&d.stall_interpretation));
+    if !d.stalls.is_empty() {
+        b.push_str("<table><tr><th>Phase</th><th>Position</th><th>Run time</th><th>Blocked</th><th>Read-back</th></tr>");
+        for s in &d.stalls { let _ = write!(b, "<tr><td>{}</td><td>{}</td><td>{:.2} s</td><td>{:.2} s</td><td>{}</td></tr>", esc(&s.phase), s.offset.map(size).unwrap_or_else(|| "no disk position".into()), s.at, s.seconds, if s.write_path { "fast and correct: write-path stall" } else { "not established" }); }
+        b.push_str("</table>");
+    }
+    b.push_str("</section>");
+    b
 }
 
 const CSS: &str = r#"
@@ -549,6 +598,7 @@ impl Report {
             b.push_str("</ul>");
         }
         b.push_str("</div>");
+        if let Some(d) = &self.diagnostics { b.push_str(&diagnostics_html(d)); }
         if !self.warnings.is_empty() {
             b.push_str("<h2>Warnings</h2><ul>");
             for w in &self.warnings {
@@ -707,6 +757,11 @@ impl Report {
         let _ = write!(b, "<tr><th>{operation_label}</th><td>{}</td></tr><tr><th>Started / finished</th><td>{} / {}</td></tr><tr><th>Tool</th><td>{}</td></tr></table></div>", esc(&operation), esc(&self.started), esc(&self.finished), esc(&self.tool));
         let identity_label = if identification_only { "Input" } else { "Drive identity" };
         let _ = write!(b, "<h2>{identity_label}</h2><table>{}</table>", identity_rows(&self.target, self.serials_hidden));
+        if let Some(d) = &self.diagnostics {
+            b.push_str("<h2>Quick diagnostics</h2><ul>");
+            for line in d.summary_lines() { let _ = write!(b, "<li>{}</li>", esc(&line)); }
+            b.push_str("</ul>");
+        }
         b.push_str("<h2>Evidence</h2><ul>");
         for d in &self.verdict.details {
             let _ = write!(b, "<li>{}</li>", esc(d));
@@ -726,7 +781,7 @@ impl Report {
         }
         b.push_str("</ul>");
         if let Some(p) = &self.probe {
-            let _ = write!(b, "<h2>Capacity map</h2><p class=mut>Each cell is one test position across the claimed capacity, in order. Green: data stored and read back correctly. Red: data lost. Amber: data overwritten by a write to another position (wraparound).</p>{}", p.map_html());
+            let _ = write!(b, "<h2>Capacity map</h2><p class=mut>Each cell is one test position across the claimed capacity, in order. Green: data stored and read back correctly. Red: data lost. Amber: data overwritten by a write to another position (wraparound). Gray: not checked.</p>{}", p.map_html());
         } else if let Some(v) = self.verify.last() {
             b.push_str("<h2>Test coverage</h2><p class=mut>Green: checked without errors. Red: lost or unreadable data. Amber: data from another position. Gray: not checked or detailed results unavailable.</p>");
             let span = self.tested.max(self.write.last().map_or(0, |w| w.end));
@@ -742,6 +797,8 @@ impl Report {
             b.push_str("<h2>Method</h2><p>This report uses a supplied NAND ID or saved device response, the built-in database and the chosen response layout. No device was queried or tested. Matching parts and identity fields cannot confirm usable capacity or whether the drive is genuine.</p>");
         } else if self.verdict.status == Status::Refused {
             b.push_str("<h2>Method</h2><p>The operation was refused before testing. No test data was written and capacity was not checked.</p>");
+        } else if self.diagnostics.is_some() {
+            b.push_str("<h2>Method</h2><p>Destructive quick diagnostics: discard, sampled capacity probe, bounded writes with wrap checks, mixed and random I/O, recovery and sampled read-back. A full write-and-verify test is needed to check every byte. Cache causes are estimates; this is not a health or remaining-life percentage.</p>");
         } else if self.probe.is_some() {
             b.push_str("<h2>Method</h2><p>The capacity probe writes and reads selected positions across the available area. It estimates a capacity boundary when the samples show wraparound or a failed tail. Space between samples is not verified; a full write-and-verify test is needed to check it.</p>");
         } else if self.command == "verify" {

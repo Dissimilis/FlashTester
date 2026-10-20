@@ -188,7 +188,8 @@ impl Kind {
             Kind::Backup | Kind::Restore => "Backup and restore",
             Kind::Info => "Information",
             Kind::Scan => "Read checks",
-            Kind::Test | Kind::Probe | Kind::Verify | Kind::Diagnose => "Capacity and data loss",
+            Kind::Diagnose => "Recommended",
+            Kind::Test | Kind::Probe | Kind::Verify => "Capacity and data loss",
             Kind::Bench | Kind::Iops => "Speed",
             Kind::Endurance | Kind::SmallFiles | Kind::PlugPull => "Reliability",
             Kind::Fix => "Formatting",
@@ -228,7 +229,7 @@ impl Kind {
         if protected {
             &[Kind::Info, Kind::Bench, Kind::Scan]
         } else if raw {
-            &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Diagnose, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
+            &[Kind::Diagnose, Kind::Info, Kind::Backup, Kind::Restore, Kind::Probe, Kind::Test, Kind::Verify, Kind::Scan, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::Fix]
         } else if cfg!(target_os = "freebsd") {
             // No free-space probe on FreeBSD: it cannot map a file to disk blocks.
             &[Kind::Info, Kind::Backup, Kind::Restore, Kind::Test, Kind::Verify, Kind::Bench, Kind::Iops, Kind::Endurance, Kind::SmallFiles, Kind::PlugPull]
@@ -1069,10 +1070,13 @@ impl Gui {
     }
 
     fn test_row(&self, ui: &mut egui::Ui, kd: Kind, raw: bool) -> egui::Response {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+        // Quick diagnostics is the main choice for a whole disk: a taller, tinted card.
+        let main = kd == Kind::Diagnose;
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if main { 48.0 } else { 30.0 }), Sense::click());
         let on = self.kind == kd;
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, kd.name()));
-        let (fill, stroke, ring, dot) = k::row_colors(on, kd.erases(raw), resp.hovered(), Color32::TRANSPARENT, Color32::TRANSPARENT);
+        let (idle_fill, idle_stroke) = if main { (k::SEL, k::ACCENT) } else { (Color32::TRANSPARENT, Color32::TRANSPARENT) };
+        let (fill, stroke, ring, dot) = k::row_colors(on, kd.erases(raw), resp.hovered(), idle_fill, idle_stroke);
         let p = ui.painter();
         let cy = rect.center().y;
         p.rect(rect, 3.0, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
@@ -1085,12 +1089,18 @@ impl Gui {
             k::paint_icon(p, Rect::from_center_size(pos2(x - 6.5, cy), Vec2::splat(13.0)), Icon::Shield, k::WARN);
             x -= 21.0;
         }
-        if kd == Kind::Test && !self.protected() {
+        if kd == Kind::Test && !raw && !self.protected() {
             x = k::paint_medium(p, pos2(x, cy), Align2::RIGHT_CENTER, "Suggested", 11.0, k::LINK).left() - 8.0;
         }
         let left = rect.left() + 34.0;
-        let g = k::galley(ui, if raw && kd == Kind::Bench { "Read speed" } else { kd.name() }, FontId::proportional(14.0), x - left);
-        p.galley(pos2(left, cy - g.size().y / 2.0), g, if on { k::TEXT } else { k::TEXT2B });
+        let g = k::galley(ui, if raw && kd == Kind::Bench { "Read speed" } else { kd.name() }, FontId::proportional(if main { 15.0 } else { 14.0 }), x - left);
+        if main {
+            let sub = k::galley(ui, "Capacity, cache, speed and stalls in about 10 minutes", FontId::proportional(12.0), x - left);
+            p.galley(pos2(left, cy - g.size().y - 1.0), g, k::TEXT);
+            p.galley(pos2(left, cy + 1.0), sub, k::TEXT2);
+        } else {
+            p.galley(pos2(left, cy - g.size().y / 2.0), g, if on { k::TEXT } else { k::TEXT2B });
+        }
         k::pointer_on_hover(&resp);
         resp
     }

@@ -135,8 +135,16 @@ pub struct Diagnostics {
     pub trim: String,
     pub written: u64,
     pub distinct_upper_bound: u64,
-    /// Best early five-second mean; retain the JSON name for saved reports.
+    /// First fast stretch on a drop, otherwise sample-median burst speed. Legacy JSON name.
     pub peak_mb_s: f64,
+    #[serde(default)]
+    pub burst_mb_s: Option<f64>,
+    #[serde(default)]
+    pub sustained_mb_s: Option<f64>,
+    #[serde(default)]
+    pub write_pattern: String,
+    #[serde(default)]
+    pub cache_bytes: Option<u64>,
     pub drop_at: Option<u64>,
     pub drop_confirmed_at: Option<u64>,
     pub post_mb_s: Option<f64>,
@@ -199,15 +207,25 @@ impl Diagnostics {
         use crate::report::{size, duration};
         let mut lines = vec![];
         let speed = if self.peak_mb_s > 0. { format!("{:.1} MB/s before the drop", self.peak_mb_s) }
-            else { "no five-second reference measured".into() };
+            else { "burst speed not measured".into() };
         if self.written == 0 { lines.push("Sequential write: not measured.".into()); }
         else if let Some(pos) = self.drop_at {
             let after = self.post_mb_s.map(|v| format!("{v:.1} MB/s")).unwrap_or_else(|| "not measured".into());
             lines.push(format!("Sequential write: {speed}; slowdown near {}, then {after}.", size(pos)));
             lines.push(if self.heat_suspected { "Heat, power or controller/garbage-collection slowdown is suspected; this is not a cache-size measurement.".into() }
-                else if self.baseline_read_mb_s.is_some() { format!("Estimated fast stretch: {}. Reads stayed fast: the write cache is a likely cause, not proven.", size(pos)) }
+                else if self.baseline_read_mb_s.is_some() { format!("Estimated fast stretch: {}. Reads stayed fast: the write cache is a likely cause, not proven.", size(self.cache_bytes.unwrap_or(pos))) }
                 else { "No pre-drop read baseline was available; the cause of the write slowdown is unconfirmed.".into() });
-        } else { lines.push(format!("Sequential write: no drop in the first {}; {}.", size(self.written), if self.peak_mb_s > 0. { format!("five-second reference {:.1} MB/s", self.peak_mb_s) } else { speed })); }
+        } else {
+            lines.push(format!("Sequential write: no drop in the first {}.", size(self.written)));
+            if let Some(sustained) = self.sustained_mb_s {
+                lines.push(if self.write_pattern == "bursts with regular pauses" {
+                    format!("Writes in bursts at {:.1} MB/s with regular pauses; sustained {sustained:.1} MB/s.", self.burst_mb_s.unwrap_or(self.peak_mb_s))
+                } else { format!("Sequential writes sustained {sustained:.1} MB/s (typical sample {:.1} MB/s).", self.peak_mb_s) });
+            } else if self.peak_mb_s > 0. { lines.push(format!("Write speed: {:.1} MB/s.", self.peak_mb_s)); }
+            if self.write_pattern == "bursts with regular pauses" && !self.trim.starts_with("effective") {
+                lines.push("No distinct write-cache stretch was seen; the write cache may not have recovered since earlier writes.".into());
+            }
+        }
         if self.cache_caveat() { lines.push("All cache figures may be understated: the drive was not trimmed.".into()); }
         if self.drop_at.is_none() { lines.push("Cache recovery: not measured because no drop was seen.".into()); }
         else if self.heat_suspected { lines.push(if self.thermal_recovery { "Thermal recovery: read speed returned after idle; heat is a hypothesis, not proof." } else { "Thermal recovery: read speed did not recover within the available budget; no recovery writes were made." }.into()); }
@@ -237,37 +255,111 @@ impl Diagnostics {
     }
 }
 
-/// Windows use write-active time, excluding the deliberate verification pauses.
+/// Sample counts describe burst speeds; bytes / active time includes controller pauses.
 #[derive(Default)]
-struct DropWatch { samples: Vec<Sample>, peak: f64, low25: Option<(f64, u64)>, low15: Option<(f64, u64)> }
+struct DropWatch {
+    samples: Vec<Sample>, reference: f64, peak: f64, burst: f64, sustained: f64, sawtooth: bool,
+    // First fast stretch [start, end), then the start of the sustained measurement.
+    confirmed: Option<(usize, usize, usize)>,
+}
+fn median(mut values: Vec<f64>) -> f64 {
+    if values.is_empty() { return 0.; }
+    values.sort_by(f64::total_cmp);
+    (values[(values.len() - 1) / 2] + values[values.len() / 2]) / 2.
+}
 impl DropWatch {
+    fn time(&self, i: usize) -> f64 { if i == 0 { 0. } else { self.samples[i - 1].seconds } }
+    fn bytes(&self, a: usize, b: usize) -> u64 { self.samples[a..b].iter().map(|s| s.bytes).sum() }
+    fn speed(&self, a: usize, b: usize) -> f64 { self.bytes(a, b) as f64 / 1e6 / (self.time(b) - self.time(a)).max(1e-9) }
+    fn window_speed(&self, start: usize, end: usize) -> Option<f64> {
+        let since = self.time(end) - 5.;
+        if since < self.time(start) { return None; }
+        let mut bytes = 0.;
+        for i in (start..end).rev() {
+            let to = self.time(i + 1);
+            if to <= since { break; }
+            let duration = to - self.time(i);
+            bytes += self.samples[i].bytes as f64 * (to - self.time(i).max(since)) / duration.max(1e-9);
+        }
+        Some(bytes / 5e6)
+    }
+    fn pauses(&self, start: usize, burst: f64) -> Vec<(usize, usize)> {
+        let fast_time = median((start..self.samples.len()).filter(|&i| self.samples[i].mb_s >= burst * 0.85)
+            .map(|i| self.time(i + 1) - self.time(i)).collect());
+        let mut pauses = vec![];
+        let mut i = start;
+        while i < self.samples.len() {
+            if self.samples[i].mb_s >= burst * 0.5 { i += 1; continue; }
+            let a = i;
+            while i < self.samples.len() && self.samples[i].mb_s < burst * 0.5 { i += 1; }
+            // A lower plateau has many ordinary-duration samples. A pause must
+            // contain a slow completion, including adjacent transition samples.
+            if (a..i).any(|j| self.time(j + 1) - self.time(j) >= fast_time * 3.) { pauses.push((a, i)); }
+        }
+        pauses
+    }
+    fn after(&self) -> Option<f64> { self.confirmed.map(|(_, _, post)| self.speed(post, self.samples.len())) }
+    fn cache_bytes(&self) -> Option<u64> { self.confirmed.map(|(a, b, _)| self.bytes(a, b)) }
+    fn update(&self, r: &mut Diagnostics) {
+        r.peak_mb_s = self.peak;
+        r.burst_mb_s = Some(self.burst);
+        r.sustained_mb_s = Some(self.sustained);
+        r.cache_bytes = self.cache_bytes();
+        r.write_pattern = if self.sawtooth { "bursts with regular pauses" } else { "continuous writes" }.into();
+    }
     fn push(&mut self, s: Sample) -> Option<u64> {
         self.samples.push(s);
-        let last = self.samples.last().unwrap();
-        let now = last.seconds;
-        // Skip the first sample: waking the controller is not sustained throughput.
-        let start = (now - 5.).max(self.samples[0].seconds);
-        let mut bytes = 0.;
-        let mut duration = 0.;
-        for i in (1..self.samples.len()).rev() {
-            let x = &self.samples[i];
-            if x.seconds <= start { break; }
-            let overlap = x.seconds - self.samples[i - 1].seconds.max(start);
-            bytes += x.mb_s * overlap;
-            duration += overlap;
+        let n = self.samples.len();
+        // Five consecutive samples resist isolated spikes without weighting a
+        // long wake-up or controller pause more heavily than a normal completion.
+        if n >= 5 && (self.time(n) <= 10. || self.reference == 0.) {
+            self.reference = self.reference.max(median(self.samples[n - 5..].iter().map(|s| s.mb_s).collect()));
         }
-        if duration < 4.999 { return None; }
-        let speed = bytes / duration;
-        if now - self.samples[0].seconds <= 10. || self.peak == 0. { self.peak = self.peak.max(speed); }
-        let mut found = None;
-        for (threshold, hold, since) in [(0.75, 10., &mut self.low25), (0.85, 20., &mut self.low15)] {
-            if speed <= self.peak * threshold {
-                let onset = self.samples.iter().rev().take_while(|s| s.mb_s <= self.peak * 0.85).last().map_or(last.offset, |s| s.offset);
-                let (t, p) = *since.get_or_insert((now, onset));
-                if now - t >= hold { found = Some(p); }
-            } else { *since = None; }
+        let reference = if self.reference > 0. { self.reference } else { median(self.samples.iter().map(|s| s.mb_s).collect()) };
+        let start = self.samples.iter().position(|s| s.mb_s >= reference * 0.5).unwrap_or(0);
+        self.burst = median(self.samples[start..].iter().map(|s| s.mb_s).collect());
+        self.sustained = self.speed(start, n);
+        self.sawtooth = self.pauses(start, self.burst).len() >= 2;
+        if let Some((a, b, _)) = self.confirmed { self.peak = self.speed(a, b); return Some(self.samples[b].offset); }
+        self.peak = self.burst;
+        if n < 5 { return None; }
+        let pauses = self.pauses(start, reference);
+        let mut end = pauses.first().map_or(n, |p| p.0);
+        let mut i = start;
+        while i < end {
+            if self.samples[i].mb_s >= reference * 0.85 { i += 1; continue; }
+            let a = i;
+            while i < n && self.samples[i].mb_s < reference * 0.85 { i += 1; }
+            // Short boundary writes and isolated dips must not move a later cliff
+            // to an earlier address. A lower level needs two seconds of evidence.
+            if self.time(i) - self.time(a) >= 2. { end = a; break; }
         }
-        found
+        let first = self.time(end) - self.time(start);
+        if end == n || first < 1. { return None; }
+        let before = self.speed(start, end);
+        if pauses.len() >= 3 && pauses[0].0 == end {
+            let typical = median(pauses.windows(2).map(|p| self.time(p[1].0) - self.time(p[0].1)).collect());
+            let last = pauses.last().unwrap().1;
+            let post = pauses[0].1; // Complete later cycles, without the initial transition pause.
+            if first > 2. * typical && self.time(last) - self.time(end) >= 5. && self.speed(post, last) <= before * 0.75 {
+                self.confirmed = Some((start, end, post));
+            }
+        }
+        // A lasting lower level also counts. Require several samples so one
+        // long pause cannot masquerade as a lower plateau; bursts reset the hold.
+        let low = (end..n).rfind(|&i| self.samples[i].mb_s > before * 0.85).map_or(end, |i| i + 1);
+        if n - low >= 5 {
+            for (fraction, hold) in [(0.75, 10.), (0.85, 20.)] {
+                let mut since = None;
+                for j in low + 1..=n {
+                    if self.window_speed(start, j).is_some_and(|s| s <= before * fraction) {
+                        let t = *since.get_or_insert(self.time(j));
+                        if self.time(j) - t >= hold { self.confirmed = Some((start, end, end)); }
+                    } else { since = None; }
+                }
+            }
+        }
+        if self.confirmed.is_some() { self.peak = before; Some(self.samples[end].offset) } else { None }
     }
 }
 
@@ -540,7 +632,7 @@ impl Run<'_> {
                 self.r.baseline_read_mb_s = self.read_speed(dev, self.seq_end.min(256 * MIB), 2.)?;
             }
             let drop = watch.push(sample);
-            self.r.peak_mb_s = watch.peak;
+            watch.update(&mut self.r);
             if off == 0 { self.verify(dev, self.pat, 0, MIB.min(self.seq_end) as usize, false)?; }
             if self.seq_end >= next_check {
                 self.wrap_check(dev, self.seq_end, next_check / self.limits.check_every - 1)?;
@@ -548,7 +640,7 @@ impl Run<'_> {
             }
             if let Some((_, pos)) = post_start {
                 post_time += elapsed;
-                self.r.post_mb_s = Some((self.seq_end - pos) as f64 / 1e6 / post_time.max(1e-9));
+                self.r.post_mb_s = watch.after();
                 if post_time >= 15. || self.seq_end - pos >= self.r.class.post_cap() { break; }
             } else if let Some(pos) = drop {
                 self.r.drop_at = Some(pos);
@@ -558,7 +650,7 @@ impl Run<'_> {
                 self.r.heat_suspected |= self.r.baseline_read_mb_s.zip(self.r.drop_read_mb_s).is_some_and(|(a,b)| b < a * 0.75);
                 post_start = Some((active, self.seq_end));
             }
-            if self.r.class == DriveClass::Usb2 && active >= 10. && (35.0..=42.0).contains(&watch.peak) {
+            if self.r.class == DriveClass::Usb2 && active >= 10. && (35.0..=42.0).contains(&watch.peak) && (35.0..=42.0).contains(&watch.sustained) {
                 self.r.link_limited = true;
                 break;
             }
@@ -877,7 +969,7 @@ impl Run<'_> {
     fn recover(&mut self, dev: &mut dyn Dev) -> io::Result<()> {
         if self.r.drop_at.is_none() || self.r.class == DriveClass::Usb2 { return Ok(()); }
         self.phase(5, "Recovery");
-        let original = self.r.drop_at.unwrap();
+        let original = self.r.cache_bytes.unwrap_or(self.r.drop_at.unwrap());
         if self.r.heat_suspected {
             while self.end - self.clock.now() >= 4. {
                 self.idle(3.)?;
@@ -1070,7 +1162,7 @@ fn finish_verdict(r: &mut Diagnostics) {
     if r.triage_failing { r.warnings.push("SMART was already reporting failure; only the probe and a small verified sample were run.".into()); }
     if r.reads_freeze { r.warnings.push("Bulk storage only: it freezes reads while writing.".into()); }
     if r.link_limited { r.warnings.push("The measured speed is at the USB 2 ceiling (about 35-40 MB/s); this port limits speed.".into()); }
-    if r.peak_mb_s > 0. && r.peak_mb_s < 5. { r.warnings.push("Sequential writes are very slow.".into()); }
+    if r.post_mb_s.or(r.sustained_mb_s).is_some_and(|s| s > 0. && s < 5.) { r.warnings.push("Sequential writes are very slow.".into()); }
     if r.cache_caveat() { r.warnings.push("Cache figures may be understated: the drive was not trimmed.".into()); }
     if let Some(s) = r.stalls.iter().filter(|s| s.offset.is_some() && s.seconds >= 10.).max_by(|a,b| a.seconds.total_cmp(&b.seconds)) {
         r.warnings.push(format!("The drive stopped responding for {:.1} s; long pauses like this make copies hang. Only 60 s without an I/O completion aborts the run.", s.seconds));
@@ -1106,14 +1198,128 @@ mod tests {
         assert!(failing(&s));
     }
 
+    fn hardware_trace(name: &str, speed: (f64, f64), sustained: (f64, f64), cache_mb: Option<(f64, f64)>) {
+        let block = include_str!("../tests/data/diagnose-traces.txt").split("# ").find(|b| b.starts_with(&format!("{name}:"))).unwrap();
+        let (expectation, samples) = block.split_once('\n').unwrap();
+        let expected_drop = expectation.contains("report a drop") && !expectation.contains("must not report a drop");
+        assert_eq!(expected_drop, cache_mb.is_some(), "{expectation}");
+        let mut watch = DropWatch::default();
+        let mut found = None;
+        let mut confirmed = 0.;
+        let mut before = 0.;
+        for token in samples.split_whitespace() {
+            let fields: Vec<_> = token.split(':').collect();
+            let sample = Sample { seconds: fields[0].parse().unwrap(), offset: fields[1].parse().unwrap(),
+                bytes: fields[2].parse().unwrap(), mb_s: fields[3].parse().unwrap() };
+            let now = sample.seconds;
+            if let Some(pos) = watch.push(sample) {
+                assert!(expected_drop, "{expectation}: false drop at {now}");
+                if found.is_none() { found = Some(pos); confirmed = now; before = watch.peak; }
+                assert_eq!(found, Some(pos));
+                assert_eq!(watch.peak, before);
+            }
+        }
+        assert_eq!(found.is_some(), expected_drop, "{expectation}");
+        assert!((speed.0..=speed.1).contains(&watch.peak), "{name}: {}", watch.peak);
+        let measured = watch.after().unwrap_or(watch.sustained);
+        assert!((sustained.0..=sustained.1).contains(&measured), "{name}: {measured}");
+        if let Some((lo, hi)) = cache_mb { assert!((lo..=hi).contains(&(watch.cache_bytes().unwrap() as f64 / 1e6))); }
+        if name.starts_with("kingston") || name.starts_with("verbatim") {
+            assert!(confirmed < Limits::new(DriveClass::Usb2, 64 * GB, 4096, None).phases[3] - 5., "confirmation must leave time for read checks");
+        }
+        let last = watch.samples.last().unwrap();
+        let mut d = Diagnostics { written: last.offset + last.bytes, drop_at: found, post_mb_s: watch.after(),
+            trim: "unsupported".into(), baseline_read_mb_s: Some(100.), final_complete: true, probe: Some(Default::default()), ..Default::default() };
+        watch.update(&mut d);
+        finish_verdict(&mut d);
+        assert!(!d.warnings.iter().any(|s| s.contains("very slow")));
+        if expectation.contains("sawtooth") && !expected_drop {
+            assert_eq!(d.write_pattern, "bursts with regular pauses");
+            assert!(d.summary_lines().iter().any(|s| s.contains("cache may not have recovered")));
+        }
+        let report = report(&DiskInfo::default(), d);
+        let line = if expected_drop { format!("{:.1} MB/s before the drop", watch.peak) }
+            else if watch.sawtooth { format!("Writes in bursts at {:.1} MB/s", watch.burst) }
+            else { format!("sustained {:.1} MB/s", watch.sustained) };
+        assert!(report.text().contains(&line));
+        assert!(report.html().contains(&line));
+        let mut json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["diagnostics"]["peak_mb_s"], watch.peak);
+        assert_eq!(json["diagnostics"]["sustained_mb_s"], watch.sustained);
+        for field in ["burst_mb_s", "sustained_mb_s", "write_pattern", "cache_bytes"] { json["diagnostics"].as_object_mut().unwrap().remove(field); }
+        let old: crate::report::Report = serde_json::from_value(json).unwrap();
+        assert!(old.diagnostics.unwrap().sustained_mb_s.is_none());
+        println!("{name}: {} {:.2} MB/s, sustained/after {measured:.2} MB/s, cache {:?} MB, confirmed {confirmed:.2} s",
+            if expected_drop { "before" } else { "burst" }, watch.peak, watch.cache_bytes().map(|n| n as f64 / 1e6));
+    }
+
+    #[test]
+    fn trace_transcend_drop_falsely_reported() { hardware_trace("transcend_drop_falsely_reported", (23., 26.), (17., 20.), None); }
+    #[test]
+    fn trace_transcend_p4() { hardware_trace("transcend_p4", (21., 25.), (14., 19.), None); }
+    #[test]
+    fn trace_kingston_r3() { hardware_trace("kingston_r3", (23., 27.), (10., 14.), Some((60., 90.))); }
+    #[test]
+    fn trace_kingston_p4() { hardware_trace("kingston_p4", (23., 27.), (10., 14.), Some((40., 65.))); }
+    #[test]
+    fn trace_verbatim_p4() { hardware_trace("verbatim_p4", (95., 105.), (18., 25.), Some((150., 210.))); }
+    #[test]
+    fn trace_smi_r3() { hardware_trace("smi_r3", (75., 85.), (20., 32.), Some((650., 730.))); }
+    #[test]
+    fn trace_smi_p4() { hardware_trace("smi_p4", (75., 85.), (26., 32.), None); }
+    #[test]
+    fn trace_lexar_r3() { hardware_trace("lexar_r3", (24., 30.), (35., 45.), None); }
+    #[test]
+    fn trace_wd_ssd_p4() { hardware_trace("wd_ssd_p4", (340., 360.), (340., 360.), None); }
+
+    #[test]
+    fn short_boundary_dips_do_not_move_a_later_cliff() {
+        let mut watch = DropWatch::default();
+        let mut off = 0;
+        let mut boundary = 0;
+        let mut found = None;
+        for i in 0..200 {
+            let speed = if i >= 100 { 40. } else if i == 20 { 70. } else { 100. };
+            if i == 100 { boundary = off; }
+            let bytes = (speed * 1e6 * 0.2) as u64;
+            found = watch.push(Sample { seconds: (i + 1) as f64 * 0.2, offset: off, bytes, mb_s: speed });
+            off += bytes;
+            if found.is_some() { break; }
+        }
+        assert_eq!(found, Some(boundary));
+        assert!((99.0..100.).contains(&watch.peak));
+    }
+
+    #[test]
+    fn isolated_pause_is_not_a_plateau_and_slow_warning_uses_sustained_speed() {
+        let mut watch = DropWatch::default();
+        let mut seconds = 0.;
+        let mut off = 0;
+        for i in 0..150 {
+            let elapsed = if i == 50 { 20. } else { 0.2 };
+            seconds += elapsed;
+            assert!(watch.push(Sample { seconds, offset: off, bytes: MIB, mb_s: MIB as f64 / 1e6 / elapsed }).is_none());
+            off += MIB;
+        }
+        for (peak, sustained, warn) in [(1.8, 29., false), (100., 3., true)] {
+            let mut d = Diagnostics { peak_mb_s: peak, sustained_mb_s: Some(sustained), ..Default::default() };
+            finish_verdict(&mut d);
+            assert_eq!(d.warnings.iter().any(|s| s.contains("very slow")), warn);
+        }
+    }
+
     #[test]
     fn drop_requires_sustained_slowdown() {
         for (slow, expected_time) in [(70., 24.), (82., 34.)] {
             let mut watch = DropWatch::default();
             let mut found = None;
+            let mut off = 0;
             for i in 1..=250 {
                 let speed = if i <= 50 { 100. } else { slow };
-                if watch.push(Sample { seconds: i as f64 * 0.2, offset: i * 20000, bytes: 20000, mb_s: speed }).is_some() {
+                let bytes = (speed * 1e6 * 0.2) as u64;
+                let sample = Sample { seconds: i as f64 * 0.2, offset: off, bytes, mb_s: speed };
+                off += bytes;
+                if watch.push(sample).is_some() {
                     found = Some(i as f64 * 0.2); break;
                 }
             }
@@ -1125,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn sawtooth_writes_use_the_same_window_as_the_reference() {
+    fn sawtooth_writes_separate_burst_speed_from_sustained_speed() {
         struct Sawtooth { disk: crate::dev::MemDev, clock: Clock, duration: f64 }
         impl Dev for Sawtooth {
             fn len(&self) -> u64 { self.disk.len() }
@@ -1154,14 +1360,16 @@ mod tests {
             assert!(watch.push(Sample { seconds: d.clock.now(), offset: off, bytes: bytes as u64, mb_s: bytes as f64 / 1e6 / duration }).is_none());
             off += bytes as u64;
         }
-        assert!((0.017..0.022).contains(&watch.peak), "{}", watch.peak);
+        assert!((0.023..0.026).contains(&watch.peak), "{}", watch.peak);
+        assert!((0.017..0.022).contains(&watch.sustained));
+        assert!(watch.sawtooth);
         let r = Diagnostics { written: off, peak_mb_s: watch.peak, drop_at: Some(MIB), ..Default::default() };
         assert!(r.summary_lines().iter().any(|s| s.contains("MB/s before the drop")));
         assert_eq!(serde_json::to_value(&r).unwrap()["peak_mb_s"], watch.peak);
     }
 
     #[test]
-    fn five_second_reference_still_detects_early_real_cliffs() {
+    fn burst_reference_still_detects_early_real_cliffs() {
         for (fast, slow, cache) in [(25_000., 12_000., 100_000), (100_000., 16_000., 110_000), (80_000., 26_000., 690_000)] {
             let mut d = CacheDev::new(4 * MIB, 4 * MIB, SimMode::Genuine, cache, fast, slow);
             let mut watch = DropWatch::default();

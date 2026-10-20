@@ -805,6 +805,7 @@ impl Run<'_> {
         // Initialise only what fits in a sixth of the phase, leaving time to measure
         // and verify even a slow stick. Random reads need known contents throughout.
         let init_end = self.clock.now() + (self.end - self.clock.now()).max(0.) / 6.;
+        self.ctx.log(format!("Small writes: preparing {} at {}.", crate::report::size(span), crate::report::size(self.seq_end)));
         let mut buf = AlignedBuf::new(self.limits.block.max(128 * 1024));
         while self.mixed.1 - self.mixed.0 < span && self.clock.now() < init_end {
             let n = (span - (self.mixed.1 - self.mixed.0)).min(self.limits.block as u64) as usize;
@@ -817,6 +818,7 @@ impl Run<'_> {
         let seconds: f64 = if self.r.class == DriveClass::Nvme { 15. } else { 10. };
         let read_len = self.r.drop_at.unwrap_or(self.seq_end).min(self.seq_end) / 4096 * 4096;
         if read_len < 8192 { self.r.warnings.push("Too little pre-drop data for varying reads during writes.".into()); return Ok(()); }
+        self.ctx.log(format!("Small writes: idle 4K reads over the first {}.", crate::report::size(read_len)));
         let idle = self.random(dev, 0, read_len, false, 1, seconds.min((self.end - self.clock.now()).max(0.) / 5.))?;
         self.r.idle_read_ms = Some(idle.p50_ms);
         let third = (self.end - self.clock.now()).max(0.) / 3.;
@@ -824,6 +826,7 @@ impl Run<'_> {
         let write_end = self.clock.now() + third;
         let started = self.clock.now();
         let mut mixed = Phase { name: "Mixed small writes".into(), ..Default::default() };
+        self.ctx.log("Small writes: mixed writes with overlapping reads.".to_string());
         let mut reader = dev.fork()?;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let stop = std::sync::atomic::AtomicBool::new(false);

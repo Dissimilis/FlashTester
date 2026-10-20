@@ -51,12 +51,39 @@ pub struct Completion {
     pub seconds: f64,
     pub at: f64,
     pub gap: f64,
+    pub tally: Option<Tally>,
 }
 
-/// A bounded sequential window, with independent handles and at most `qd` writes
-/// outstanding. Drain before returning so read pauses and wrap checks are real fences.
+/// Bounded sequential I/O with independent handles. Drain before returning so
+/// read pauses and wrap checks are real fences. Reads verify the expected pattern.
 #[allow(clippy::too_many_arguments)]
 pub fn write_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block: usize, qd: usize, deadline: f64, clock: &Clock, ctx: &Ctx) -> (Vec<Completion>, std::io::Result<()>) {
+    io_window(dev, pat, start, end, block, qd, deadline, clock, ctx, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn read_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block: usize, qd: usize, deadline: f64, clock: &Clock, ctx: &Ctx) -> (Vec<Completion>, std::io::Result<()>) {
+    io_window(dev, pat, start, end, block, qd, deadline, clock, ctx, false)
+}
+
+fn window_io(dev: &mut dyn Dev, pat: Pattern, off: u64, buf: &mut [u8], write: bool, clock: &Clock) -> (Completion, std::io::Result<()>) {
+    if write { pat.fill(off, buf); }
+    let t = clock.now();
+    let mut result = if write { dev.write_at(off, buf) } else {
+        dev.read_at(off, buf).and_then(|n| if n == buf.len() { Ok(()) } else { Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short sequential read")) })
+    };
+    let at = clock.now();
+    let mut c = Completion { off, len: if result.is_ok() { buf.len() } else { 0 }, seconds: at - t, at, gap: clock.complete(t, at), tally: None };
+    if !write && result.is_ok() {
+        let mut tally = Tally::default();
+        if !tally.check(pat, off, buf) { result = Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Written data changed at byte {off}."))); }
+        c.tally = Some(tally);
+    }
+    (c, result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn io_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block: usize, qd: usize, deadline: f64, clock: &Clock, ctx: &Ctx, write: bool) -> (Vec<Completion>, std::io::Result<()>) {
     let mut completed = vec![];
     let mut result = Ok(());
     if qd == 1 {
@@ -64,10 +91,9 @@ pub fn write_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block
         let mut off = start;
         while off < end && clock.now() < deadline && !ctx.cancelled() {
             let n = (end - off).min(block as u64) as usize;
-            pat.fill(off, &mut buf[..n]);
-            let t = clock.now();
-            result = dev.write_at(off, &buf[..n]);
-            completed.push(Completion { off, len: if result.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now(), gap: clock.complete(t, clock.now()) });
+            let (c, r) = window_io(dev, pat, off, &mut buf[..n], write, clock);
+            result = r;
+            completed.push(c);
             if result.is_err() || completed.last().unwrap().gap >= 10.0 { break; }
             off += n as u64;
         }
@@ -85,10 +111,7 @@ pub fn write_window(dev: &mut dyn Dev, pat: Pattern, start: u64, end: u64, block
             scope.spawn(move || {
                 let mut buf = AlignedBuf::new(block);
                 while let Ok((off, n)) = jobs.recv() {
-                    pat.fill(off, &mut buf[..n]);
-                    let t = clock.now();
-                    let r = handle.write_at(off, &buf[..n]);
-                    let c = Completion { off, len: if r.is_ok() { n } else { 0 }, seconds: clock.now() - t, at: clock.now(), gap: clock.complete(t, clock.now()) };
+                    let (c, r) = window_io(&mut *handle, pat, off, &mut buf[..n], write, clock);
                     if tx.send((id, c, r)).is_err() { break; }
                 }
             });

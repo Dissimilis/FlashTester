@@ -100,7 +100,7 @@ pub(crate) fn random_io(handles: Vec<Box<dyn crate::dev::Dev>>, o: RandomOpts, c
                     let elapsed = at - t;
                     let gap = clock.complete(t, at);
                     worst = worst.max(elapsed * 1000.);
-                    if elapsed >= 2. { stalls.push(crate::engine::Completion { off, len: IO, seconds: elapsed, at, gap }); }
+                    if elapsed >= 2. { stalls.push(crate::engine::Completion { off, len: IO, seconds: elapsed, at, gap, tally: None }); }
                     if let Err(e) = result { error = Some(e); }
                     else if !o.write && o.pattern.is_some() && !tally.check(pat, off, &buf) { error = Some(io::Error::new(io::ErrorKind::InvalidData, format!("Random read returned wrong data at {off}"))); }
                     else if gap >= 10. { error = Some(io::Error::other(format!("No I/O completed for {gap:.1} s; a blocked call overran the limit."))); }

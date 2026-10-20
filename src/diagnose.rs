@@ -33,7 +33,7 @@ impl DriveClass {
 pub fn classify(d: &DiskInfo, smart: Option<&Smart>) -> DriveClass {
     if d.usb.as_ref().is_some_and(|u| u.slow_link) { return DriveClass::Usb2; }
     if d.bus == "USB" {
-        return if smart.is_some_and(|s| s.via.contains("NVMe") || s.via.contains("SAT")) { DriveClass::Sata } else { DriveClass::Usb };
+        return if d.ssd_hint == Some(true) || smart.is_some_and(|s| s.via.contains("NVMe") || s.via.contains("SAT")) { DriveClass::Sata } else { DriveClass::Usb };
     }
     match d.bus.as_str() { "SD" | "MMC" => DriveClass::Usb, "NVMe" => DriveClass::Nvme, _ => DriveClass::Sata }
 }
@@ -362,6 +362,9 @@ impl Run<'_> {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Written data changed at byte {off}.")));
         }
         self.r.tally.merge(&t);
+        self.replay_reads(dev, pat, off, n, started, elapsed)
+    }
+    fn replay_reads(&mut self, dev: &mut dyn Dev, pat: Pattern, off: u64, n: usize, started: f64, elapsed: f64) -> io::Result<()> {
         if !self.replayed {
             self.reads.push_back((started, pat, off, n));
             while self.reads.len() > 1 && self.reads[1].0 < self.clock.now() - 10. { self.reads.pop_front(); }
@@ -452,12 +455,31 @@ impl Run<'_> {
         let start = self.clock.now();
         let end = (start + seconds).min(self.end);
         let mut bytes = 0;
-        let mut pos = 0;
+        let qd = self.r.class.qd();
+        let block = self.limits.block.min((len / qd as u64 / dev.align() as u64).max(1) as usize * dev.align());
         while self.clock.now() < end {
-            let n = (len - pos).min(self.limits.block as u64) as usize;
-            self.verify(dev, self.pat, pos, n, false)?;
-            bytes += n as u64;
-            pos = (pos + n as u64) % len;
+            self.ready()?;
+            let (mut done, result) = engine::read_window(dev, self.pat, 0, len, block, qd, end, &self.clock, self.ctx);
+            if done.is_empty() { result?; break; }
+            done.sort_by(|a,b| a.at.total_cmp(&b.at));
+            for c in &done {
+                self.record_at(c.off, c.len, c.seconds, c.at, false);
+                bytes += c.len as u64;
+                if let Some(t) = &c.tally {
+                    self.r.tally.merge(t);
+                    if t.lost() > 0 {
+                        self.r.status = if t.aliased > 0 { Status::Fake } else { Status::Defective };
+                        // Retry once, retaining the original fault even if it clears.
+                        let mut buf = AlignedBuf::new(c.len);
+                        self.read(dev, c.off, &mut buf)?;
+                        if self.pat.buffer_ok(c.off, &buf) { self.r.status = Status::Unreliable; }
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Written data changed at byte {}.", c.off)));
+                    }
+                }
+            }
+            result?;
+            if done.iter().any(|c| c.gap >= 10.) { return Err(io::Error::other("No I/O completed for 10 s; a blocked read overran the limit.")); }
+            for c in done { self.replay_reads(dev, self.pat, c.off, c.len, c.at - c.seconds, c.seconds)?; }
         }
         Ok((bytes > 0).then(|| bytes as f64 / 1e6 / (self.clock.now() - start).max(1e-9)))
     }
@@ -476,6 +498,7 @@ impl Run<'_> {
             let start = self.clock.now();
             let off = self.seq_end;
             let mut end = cap.min(next_check);
+            if self.r.baseline_read_mb_s.is_none() && post_start.is_none() { end = end.min(256 * MIB); }
             if let Some((_, pos)) = post_start { end = end.min(pos + self.r.class.post_cap() / dev.align() as u64 * dev.align() as u64); }
             if end <= off { break; }
             let deadline = (start + 0.2).min(self.end);
@@ -495,13 +518,17 @@ impl Run<'_> {
             self.ctx.progress(self.seq_end);
             self.ctx.sample(off, sample.mb_s);
             self.r.samples.push(sample.clone());
+            // Baseline before the detector can confirm a drop, including small drives.
+            if self.r.baseline_read_mb_s.is_none() && post_start.is_none() && self.seq_end >= 4 * MIB
+                && (self.seq_end >= 256 * MIB || active >= 2. || self.seq_end == cap) {
+                self.r.baseline_read_mb_s = self.read_speed(dev, self.seq_end.min(256 * MIB), 2.)?;
+            }
             let drop = watch.push(sample);
             self.r.peak_mb_s = watch.peak;
             if off == 0 { self.verify(dev, self.pat, 0, MIB.min(self.seq_end) as usize, false)?; }
             if self.seq_end >= next_check {
                 self.wrap_check(dev, self.seq_end, next_check / self.limits.check_every - 1)?;
                 next_check += self.limits.check_every;
-                if self.r.baseline_read_mb_s.is_none() { self.r.baseline_read_mb_s = self.read_speed(dev, self.seq_end.min(GB), 2.)?; }
             }
             if let Some((_, pos)) = post_start {
                 post_time += elapsed;
@@ -524,6 +551,27 @@ impl Run<'_> {
         self.flush(dev)?;
         Ok(())
     }
+}
+
+// Pick among the eligible 4K blocks except the last one, avoiding a cache hit
+// from repeatedly polling one address. Callers require at least two blocks.
+fn random_read_offset(rng: &mut u64, previous: &mut Option<u64>, len: u64) -> u64 {
+    *rng = crate::pattern::xorshift(*rng);
+    let blocks = len / 4096;
+    let block = if let Some(last) = *previous {
+        let next = *rng % (blocks - 1);
+        if next >= last / 4096 { next + 1 } else { next }
+    } else { *rng % blocks };
+    let off = block * 4096;
+    *previous = Some(off);
+    off
+}
+
+fn mixed_read(dev: &mut dyn Dev, pat: Pattern, rng: &mut u64, previous: &mut Option<u64>, len: u64, buf: &mut [u8]) -> (u64, io::Result<()>) {
+    let off = random_read_offset(rng, previous, len);
+    let result = dev.read_at(off, buf).and_then(|n| if n != buf.len() { Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short overlapping read")) }
+        else if !pat.buffer_ok(off, buf) { Err(io::Error::new(io::ErrorKind::InvalidData, "Old data changed during mixed writes")) } else { Ok(()) });
+    (off, result)
 }
 
 /// No attribution from one or two pauses; position repetition needs distinct phases.
@@ -650,7 +698,9 @@ impl Run<'_> {
         let span = self.mixed.1 - self.mixed.0;
         if span < 128 * 1024 { self.r.warnings.push("Too little time to initialise the small-write region.".into()); return Ok(()); }
         let seconds: f64 = if self.r.class == DriveClass::Nvme { 15. } else { 10. };
-        let idle = self.random(dev, 0, self.seq_end, false, 1, seconds.min((self.end - self.clock.now()).max(0.) / 5.))?;
+        let read_len = self.r.drop_at.unwrap_or(self.seq_end).min(self.seq_end) / 4096 * 4096;
+        if read_len < 8192 { self.r.warnings.push("Too little pre-drop data for varying reads during writes.".into()); return Ok(()); }
+        let idle = self.random(dev, 0, read_len, false, 1, seconds.min((self.end - self.clock.now()).max(0.) / 5.))?;
         self.r.idle_read_ms = Some(idle.p50_ms);
         let third = (self.end - self.clock.now()).max(0.) / 3.;
         let mixed_end = self.clock.now() + third * 2.;
@@ -668,6 +718,7 @@ impl Run<'_> {
             let read_thread = scope.spawn(move || {
                 let mut samples = vec![];
                 let mut buf = AlignedBuf::new(4096);
+                let (mut rng, mut previous) = (new_tag(), None);
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_secs(1)) {
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -675,11 +726,10 @@ impl Run<'_> {
                         _ => {}
                     }
                     let start = clock.now();
-                    let r = reader.read_at(0, &mut buf).and_then(|n| if n != 4096 { Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short overlapping read")) }
-                        else if !pat.buffer_ok(0, &buf) { Err(io::Error::new(io::ErrorKind::InvalidData, "Old data changed during mixed writes")) } else { Ok(()) });
+                    let (off, r) = mixed_read(&mut *reader, pat, &mut rng, &mut previous, read_len, &mut buf);
                     let gap = clock.complete(start, clock.now());
-                    samples.push((start, clock.now() - start, r, gap));
-                    if samples.last().unwrap().2.is_err() { stop_ref.store(true, std::sync::atomic::Ordering::SeqCst); break; }
+                    samples.push((off, start, clock.now() - start, r, gap));
+                    if samples.last().unwrap().3.is_err() { stop_ref.store(true, std::sync::atomic::Ordering::SeqCst); break; }
                 }
                 samples
             });
@@ -728,8 +778,8 @@ impl Run<'_> {
             drop(tx);
             let reads = read_thread.join().unwrap();
             let mut loaded = Phase { name: "Reads during writes".into(), ..Default::default() };
-            for (start, elapsed, result, gap) in reads {
-                self.record_at(0, 4096, elapsed, start + elapsed, false);
+            for (off, start, elapsed, result, gap) in reads {
+                self.record_at(off, 4096, elapsed, start + elapsed, false);
                 loaded.latency.push(elapsed); loaded.operations += 1;
                 loaded.worst_ms = loaded.worst_ms.max(elapsed * 1000.);
                 if result.is_err() { self.r.status = Status::Unreliable; }
@@ -1011,6 +1061,11 @@ mod tests {
     fn class_and_short_run_rules() {
         let mut d = DiskInfo { bus: "USB".into(), ..Default::default() };
         assert_eq!(classify(&d, None), DriveClass::Usb);
+        d.ssd_hint = Some(true);
+        assert_eq!(classify(&d, None), DriveClass::Sata);
+        d.ssd_hint = Some(false);
+        assert_eq!(classify(&d, None), DriveClass::Usb);
+        d.ssd_hint = None;
         let mut s = Smart { via: "SAT over USB".into(), ..Default::default() };
         assert_eq!(classify(&d, Some(&s)), DriveClass::Sata);
         d.usb = Some(crate::platform::UsbInfo { slow_link: true, ..Default::default() });
@@ -1294,6 +1349,132 @@ mod later_tests {
         let mut buf = AlignedBuf::new((end - start) as usize);
         pat.fill(start, &mut buf);
         d.write_at(start, &buf).unwrap();
+    }
+
+    #[test]
+    fn mixed_reads_vary_offsets_and_check_the_pattern_there() {
+        let mut d = CacheDev::new(8 * MIB, 8 * MIB, SimMode::Genuine, 8 * MIB, 100e6, 20e6);
+        let pat = Pattern::Seeded { tag: 19 };
+        fill(&mut d, pat, 0, 4 * MIB);
+        for len in [MIB, 4 * MIB] { // Before a drop, or the entire sequential region.
+            let (mut rng, mut previous) = (12345, None);
+            let mut offsets = std::collections::BTreeSet::new();
+            let mut buf = AlignedBuf::new(4096);
+            for _ in 0..128 {
+                let last = previous;
+                let (off, result) = mixed_read(&mut d, pat, &mut rng, &mut previous, len, &mut buf);
+                result.unwrap();
+                assert!(off + 4096 <= len && off.is_multiple_of(4096));
+                assert_ne!(Some(off), last);
+                offsets.insert(off);
+            }
+            assert!(offsets.len() > 90);
+            assert!(*offsets.last().unwrap() > len * 3 / 4);
+        }
+        // LBA 0 still reads perfectly; all other sectors have changed.
+        d.state.lock().unwrap().disk.data[4096..4 * MIB as usize].fill(0);
+        let (_, result) = mixed_read(&mut d, pat, &mut 12345, &mut Some(0), 4 * MIB, &mut AlignedBuf::new(4096));
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn sequential_reader_uses_class_depth_and_stops_on_corruption() {
+        #[derive(Clone)]
+        struct Gate {
+            disk: CacheDev,
+            qd: usize,
+            entered: std::sync::Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+            forks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Dev for Gate {
+            fn len(&self) -> u64 { self.disk.len() }
+            fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
+                self.forks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Box::new(self.clone()))
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> { self.disk.write_at(off, buf) }
+            fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+                let (lock, ready) = &*self.entered;
+                let mut n = lock.lock().unwrap();
+                *n += 1;
+                ready.notify_all();
+                let (n, _) = ready.wait_timeout_while(n, std::time::Duration::from_millis(250), |n| *n < self.qd).unwrap();
+                if *n < self.qd { return Err(io::Error::other("reads did not overlap")); }
+                drop(n);
+                self.disk.read_at(off, buf)
+            }
+        }
+        for hint in [None, Some(false), Some(true)] {
+            let disk = DiskInfo { bus: "USB".into(), ssd_hint: hint, ..Default::default() };
+            let class = classify(&disk, None); // No SMART from the bridge.
+            let qd = if hint == Some(true) { 4 } else { 1 };
+            assert_eq!(class.qd(), qd);
+            assert_eq!(class.budgets()[4], if qd == 4 { 120. } else { 75. });
+            let mut d = CacheDev::new(MIB, MIB, SimMode::Genuine, MIB, 100e6, 20e6);
+            let ctx = Ctx::new();
+            let mut observe = || Ok(None);
+            let mut run = state(&d, &ctx, &mut observe);
+            run.r.class = class;
+            fill(&mut d, run.pat, 0, MIB);
+            let mut gate = Gate { disk: d, qd, entered: Default::default(), forks: Default::default() };
+            run.phase(6, "Read");
+            assert!(run.read_speed(&mut gate, MIB, 0.0001).unwrap().unwrap() > 0.);
+            assert_eq!(*gate.entered.0.lock().unwrap(), qd);
+            assert_eq!(gate.forks.load(std::sync::atomic::Ordering::SeqCst), if qd == 1 { 0 } else { 4 });
+            assert_eq!(run.r.tally.ok, qd as u64 * 8);
+            gate.disk.state.lock().unwrap().disk.data[..4096].fill(0);
+            assert!(run.read_speed(&mut gate, MIB, 1.).is_err());
+            assert_eq!(run.r.status, Status::Defective);
+        }
+    }
+
+    #[test]
+    fn sequential_reader_keeps_handle_errors_and_cancellation() {
+        let d = CacheDev::new(MIB, MIB, SimMode::Genuine, MIB, 100e6, 20e6);
+        let ctx = Ctx::new();
+        let mut observe = || Ok(None);
+        let mut run = state(&d, &ctx, &mut observe);
+        run.r.class = DriveClass::Sata;
+        run.phase(6, "Read");
+        let mut no_fork = crate::dev::MemDev::new(MIB, MIB, SimMode::Genuine);
+        assert_eq!(run.read_speed(&mut no_fork, MIB, 1.).unwrap_err().kind(), io::ErrorKind::Unsupported);
+        ctx.cancel();
+        assert_eq!(run.read_speed(&mut no_fork, MIB, 1.).unwrap_err().kind(), io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn baseline_precedes_an_early_cache_drop_and_covers_small_drives() {
+        struct Logged { disk: CacheDev, reads: Vec<(u64, u64)> }
+        impl Dev for Logged {
+            fn len(&self) -> u64 { self.disk.len() }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> { self.disk.write_at(off, buf) }
+            fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+                self.reads.push((off, self.disk.state.lock().unwrap().written));
+                self.disk.read_at(off, buf)
+            }
+        }
+        for slow in [false, true] {
+            let d = CacheDev::new(32 * MIB, 32 * MIB, SimMode::Genuine, if slow { 6 * MIB } else { 32 * MIB }, if slow { 1e6 } else { 100e6 }, 2e5);
+            let ctx = Ctx::new();
+            let mut observe = || Ok(None);
+            let mut run = state(&d, &ctx, &mut observe);
+            run.limits = Limits::new(DriveClass::Usb, d.len(), 4096, None); // Real 1 GB wrap cadence.
+            run.limits.block = 64 * 1024;
+            let mut d = Logged { disk: d, reads: vec![] };
+            run.sequential(&mut d, false).unwrap();
+            assert!(run.seq_end < GB);
+            assert!(run.r.baseline_read_mb_s.unwrap() > 0.);
+            if slow {
+                assert!(run.r.drop_at.is_some(), "{:?}", run.r.samples);
+                let first_baseline = d.reads.iter().find(|(off, _)| *off == 64 * 1024).unwrap().1;
+                assert_eq!(first_baseline, 4 * MIB);
+                assert!(first_baseline < run.r.drop_at.unwrap());
+                assert!(run.r.drop_read_mb_s.unwrap() > 0.);
+                assert!(!run.r.heat_suspected);
+            } else { assert!(run.r.drop_at.is_none()); }
+        }
     }
 
     #[test]

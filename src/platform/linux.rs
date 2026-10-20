@@ -465,6 +465,7 @@ fn disk_info(name: &str, ms: &[Mount]) -> Option<DiskInfo> {
     let devnum = read(sys.join("dev"));
     let u = udev(&devnum);
     let mut d = DiskInfo { id: name.to_string(), path: format!("/dev/{name}"), size, instance_id: p.clone(), ..Default::default() };
+    d.ssd_hint = super::linux_ssd_hint(&read(sys.join("queue/rotational")), &read(sys.join("queue/discard_max_bytes")));
     d.sector_size = num(sys.join("queue/logical_block_size")).max(512) as u32;
     d.removable = read(sys.join("removable")) == "1";
     d.bus = if p.contains("/usb") {

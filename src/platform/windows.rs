@@ -425,6 +425,35 @@ fn nvme_pci(disk_devinst: u32) -> Option<String> {
     None
 }
 
+// Seek-penalty and TRIM descriptors both have Version, Size, then a BOOLEAN.
+fn storage_bool_descriptor(bytes: &[u8]) -> Option<bool> {
+    if bytes.len() < 12 || u32_at(bytes, 0) < 12 || u32_at(bytes, 4) < 12 { return None; }
+    match bytes[8] { 0 => Some(false), 1 => Some(true), _ => None }
+}
+
+fn storage_bool(f: &File, property: u32) -> Option<bool> {
+    let mut query = [0u8; 12]; // PropertyStandardQuery
+    query[..4].copy_from_slice(&property.to_le_bytes());
+    let mut desc = [0u8; 12];
+    let n = ioctl(f, IOCTL_STORAGE_QUERY_PROPERTY, &query, &mut desc).ok()?;
+    storage_bool_descriptor(desc.get(..n)?)
+}
+
+#[test]
+fn storage_boolean_properties_reject_missing_or_truncated_descriptors() {
+    let mut desc = [0u8; 12];
+    assert_eq!(storage_bool_descriptor(&desc), None);
+    desc[..4].copy_from_slice(&12u32.to_le_bytes());
+    desc[4..8].copy_from_slice(&12u32.to_le_bytes());
+    assert_eq!(storage_bool_descriptor(&desc), Some(false));
+    desc[8] = 1;
+    assert_eq!(storage_bool_descriptor(&desc), Some(true));
+    assert_eq!(storage_bool_descriptor(&desc[..8]), None);
+    assert_eq!(super::ssd_hint(storage_bool_descriptor(&desc).map(|seek| !seek), Some(true)), Some(false));
+    desc[8] = 0;
+    assert_eq!(super::ssd_hint(storage_bool_descriptor(&desc).map(|seek| !seek), Some(true)), Some(true));
+}
+
 fn disk_details(path: &str, devinst: u32) -> io::Result<DiskInfo> {
     let f = open_dev(path, 0)?;
     let mut num = [0u8; 12];
@@ -447,6 +476,8 @@ fn disk_details(path: &str, devinst: u32) -> io::Result<DiskInfo> {
         d.size = u64_at(&g, 24);
     }
     if d.bus == "USB" {
+        // StorageDeviceSeekPenaltyProperty (7), StorageDeviceTrimProperty (8).
+        d.ssd_hint = super::ssd_hint(storage_bool(&f, 7).map(|seek| !seek), storage_bool(&f, 8));
         d.usb = usb_info(devinst);
         d.controller = d.usb.as_ref().map(|u| crate::ids::usb_controller_hint(&u.vid, &u.pid)).unwrap_or_default();
     }

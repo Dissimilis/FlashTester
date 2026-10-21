@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use crate::engine::Clock;
 
 pub const BLOCK: usize = 4096;
 
@@ -142,12 +142,23 @@ enum Got {
     IoErr,
 }
 
+/// Pass 1's writes ran much slower than calibrated: seconds per write.
+#[derive(Debug)]
+struct Slow(f64);
+impl std::fmt::Display for Slow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("probe writes slower than calibrated") }
+}
+impl std::error::Error for Slow {}
+
 /// Write the given positions in order with a fresh tag, flush, read them all back.
+/// With `slow_after`, give up with `Slow` when the writes take longer than that
+/// and less than half of them are done.
 #[allow(clippy::too_many_arguments)]
-fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx, label: &str, tag: u64, strict: bool) -> io::Result<Vec<Got>> {
+fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx, label: &str, tag: u64, strict: bool, clock: &Clock, slow_after: Option<f64>) -> io::Result<Vec<Got>> {
     let pat = Pattern::Seeded { tag };
     let mut buf = AlignedBuf::new(block);
     let mut got = vec![Got::Ok; pos.len()];
+    let t0 = clock.now();
     ctx.phase(&format!("{label}: writing"), order.len() as u64);
     for (n, &i) in order.iter().enumerate() {
         if ctx.cancelled() {
@@ -161,6 +172,10 @@ fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx
             got[i] = Got::IoErr;
         }
         ctx.progress(n as u64 + 1);
+        let spent = clock.now() - t0;
+        if slow_after.is_some_and(|s| spent > s) && 2 * (n + 1) < order.len() {
+            return Err(io::Error::other(Slow(spent / (n + 1) as f64)));
+        }
     }
     dev.flush()?;
     ctx.phase(&format!("{label}: reading"), order.len() as u64);
@@ -212,10 +227,10 @@ fn status_char(pos: u64, a: Got, b: Got) -> char {
 }
 
 /// Run the probe over `positions` (sorted) of a device claiming `claimed` bytes.
-/// Time a few scattered writes; on drives with very slow random writes, keep
-/// every k-th grid position (k a power of two, so the grid stays a power-of-two
-/// grid) to finish both passes in about `budget_s` seconds.
-fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usize, budget_s: f64, strict: bool, ctx: &Ctx) -> io::Result<(Vec<u64>, u64)> {
+/// Time a few scattered writes; on drives with very slow random writes, thin the
+/// grid to finish both passes in about `budget_s` seconds.
+#[allow(clippy::too_many_arguments)]
+fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usize, budget_s: f64, strict: bool, clock: &Clock, ctx: &Ctx) -> io::Result<(Vec<u64>, u64)> {
     if positions.len() <= 64 {
         return Ok((positions, step));
     }
@@ -226,26 +241,32 @@ fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usiz
     let mut times = vec![];
     for i in 0..samples {
         let pos = positions[n * (2 * i + 1) / (2 * samples)];
-        let t = Instant::now();
+        let t = clock.now();
         // A fake may error past its real end: that is for the passes to classify.
         let pair = dev.write_at(pos, &buf).and_then(|_| dev.read_at(pos, &mut buf));
         if strict && let Err(e) = pair { return Err(e); }
         if pair.is_ok() {
-            times.push(t.elapsed().as_secs_f64());
+            times.push(clock.now() - t);
         }
     }
     if times.len() < 3 {
         return Ok((positions, step));
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let per_write = times[times.len() / 2];
+    Ok(thin(positions, step, times[times.len() / 2], budget_s, ctx))
+}
+
+/// Keep every k-th grid position (k a power of two, so the grid stays a
+/// power-of-two grid) to write both passes in about `budget_s` seconds.
+fn thin(positions: Vec<u64>, step: u64, per_write: f64, budget_s: f64, ctx: &Ctx) -> (Vec<u64>, u64) {
+    let n = positions.len();
     let max_positions = (budget_s / (2.0 * per_write)).max(64.0) as usize;
     let mut k = 1usize;
     while n / k > max_positions && n / (k * 2) >= 64 {
         k *= 2;
     }
     if k == 1 {
-        return Ok((positions, step));
+        return (positions, step);
     }
     ctx.log(format!("Random writes are slow on this drive ({:.0} ms each): probing every {} instead of every {}", per_write * 1000.0, size(step * k as u64), size(step)));
     let last = *positions.last().unwrap();
@@ -253,11 +274,11 @@ fn thin_for_speed(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, block: usiz
     if v.last() != Some(&last) {
         v.push(last);
     }
-    Ok((v, step * k as u64))
+    (v, step * k as u64)
 }
 
 pub fn run(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode: &str, ctx: &Ctx) -> io::Result<ProbeResult> {
-    run_inner(dev, positions, step, claimed, mode, None, ctx)
+    run_inner(dev, positions, step, claimed, mode, None, &Clock::default(), ctx)
 }
 
 /// Only this marker means a phase budget; an OS timeout remains an I/O error.
@@ -405,18 +426,32 @@ pub fn run_limited(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, budget_s: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_inner(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode: &str, budget: Option<f64>, ctx: &Ctx) -> io::Result<ProbeResult> {
-    let t0 = Instant::now();
+fn run_inner(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mode: &str, budget: Option<f64>, clock: &Clock, ctx: &Ctx) -> io::Result<ProbeResult> {
+    let t0 = clock.now();
     if positions.is_empty() {
         return Err(io::Error::other("no probe positions (device or free space too small)"));
     }
     let block = BLOCK.max(dev.align());
-    let (positions, step) = thin_for_speed(dev, positions, step, block, budget.unwrap_or(300.0), budget.is_some(), ctx)?;
-    let asc: Vec<usize> = (0..positions.len()).collect();
-    let desc: Vec<usize> = asc.iter().rev().copied().collect();
-    let a = pass(dev, &positions, &asc, block, ctx, "Probe pass 1/2", new_tag(), budget.is_some())?;
+    let budget_s = budget.unwrap_or(300.0);
+    let (mut positions, mut step) = thin_for_speed(dev, positions, step, block, budget_s, budget.is_some(), clock, ctx)?;
+    // The calibration writes can land in the drive's write cache. When pass 1
+    // shows the real writes are much slower, thin by their rate and start again.
+    let mut retry = true;
+    let a = loop {
+        let asc: Vec<usize> = (0..positions.len()).collect();
+        let slow_after = (retry && positions.len() / 2 >= 64).then_some(budget_s / 4.0);
+        let a = pass(dev, &positions, &asc, block, ctx, "Probe pass 1/2", new_tag(), budget.is_some(), clock, slow_after);
+        match a.as_ref().err().and_then(|e| e.get_ref()).and_then(|e| e.downcast_ref::<Slow>()).map(|s| s.0) {
+            Some(per_write) => {
+                (positions, step) = thin(positions, step, per_write, budget_s, ctx);
+                retry = false;
+            }
+            None => break a?,
+        }
+    };
+    let desc: Vec<usize> = (0..positions.len()).rev().collect();
     let tag = new_tag();
-    let b = pass(dev, &positions, &desc, block, ctx, "Probe pass 2/2", tag, budget.is_some())?;
+    let b = pass(dev, &positions, &desc, block, ctx, "Probe pass 2/2", tag, budget.is_some(), clock, None)?;
 
     let mut r = ProbeResult { mode: mode.into(), claimed, step, block: block as u64, tag: Some(tag), ..Default::default() };
     r.status = a.iter().zip(&b).enumerate().map(|(i, (&x, &y))| status_char(positions[i], x, y)).collect();
@@ -439,8 +474,8 @@ fn run_inner(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mo
         let (fine_step, fine) = grid(2 * m, block as u64, 1024);
         let asc: Vec<usize> = (0..fine.len()).collect();
         let desc: Vec<usize> = asc.iter().rev().copied().collect();
-        let fa = pass(dev, &fine, &asc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false)?;
-        let fb = pass(dev, &fine, &desc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false)?;
+        let fa = pass(dev, &fine, &asc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false, clock, None)?;
+        let fb = pass(dev, &fine, &desc, block, ctx, "Probe: narrowing the wraparound", new_tag(), false, clock, None)?;
         let smaller = fa.iter().chain(&fb).zip(fine.iter().chain(&fine)).filter_map(|(g, &p)| if let Got::Alias(src) = g { Some(src.abs_diff(p)) } else { None }).filter(|&d| d > 0 && d < m).min();
         match smaller {
             Some(d) => {
@@ -469,19 +504,19 @@ fn run_inner(dev: &mut dyn Dev, positions: Vec<u64>, step: u64, claimed: u64, mo
             r.usable = m;
         } else if tail_bad && fb > 0 {
             r.finding = Finding::Fake;
-            r.usable = if budget.is_some() { positions[fb] } else { refine(dev, positions[fb - 1], positions[fb], block, ctx)? };
+            r.usable = if budget.is_some() { positions[fb] } else { refine(dev, positions[fb - 1], positions[fb], block, clock, ctx)? };
         } else {
             r.finding = Finding::Defective;
             r.usable = positions[fb];
         }
     }
     r.positions = positions;
-    r.seconds = t0.elapsed().as_secs_f64();
+    r.seconds = clock.now() - t0;
     Ok(r)
 }
 
 /// Narrow down the end of the real capacity between a good and a bad position.
-fn refine(dev: &mut dyn Dev, mut lo: u64, mut hi: u64, block: usize, ctx: &Ctx) -> io::Result<u64> {
+fn refine(dev: &mut dyn Dev, mut lo: u64, mut hi: u64, block: usize, clock: &Clock, ctx: &Ctx) -> io::Result<u64> {
     let b = block as u64;
     for round in 1..=4 {
         if hi - lo <= MIB {
@@ -493,7 +528,7 @@ fn refine(dev: &mut dyn Dev, mut lo: u64, mut hi: u64, block: usize, ctx: &Ctx) 
         }
         let asc: Vec<usize> = (0..pts.len()).collect();
         let desc: Vec<usize> = asc.iter().rev().copied().collect();
-        let g = pass(dev, &pts, &desc, block, ctx, &format!("Refining boundary {round}/4"), new_tag(), false)?;
+        let g = pass(dev, &pts, &desc, block, ctx, &format!("Refining boundary {round}/4"), new_tag(), false, clock, None)?;
         match g.iter().position(|&x| x != Got::Ok) {
             Some(0) => hi = pts[0],
             Some(i) => {
@@ -680,6 +715,37 @@ mod tests {
                 assert!(p.usable <= real);
                 if real <= p.step && !corrupt { assert_eq!(p.usable, 0); }
             }
+        }
+    }
+
+    #[test]
+    fn plain_probe_rethins_when_calibration_was_cached() {
+        struct SlowFlash { clock: Clock, data: std::collections::BTreeMap<u64, Vec<u8>>, writes: usize, real: u64 }
+        impl Dev for SlowFlash {
+            fn len(&self) -> u64 { 62_000_000_000 }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
+                self.clock.sleep(if self.writes < 24 { 0.001 } else { 1. });
+                self.writes += 1;
+                self.data.insert(off % self.real, buf.to_vec());
+                Ok(())
+            }
+            fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+                self.clock.sleep(0.001);
+                match self.data.get(&(off % self.real)) { Some(d) => buf.copy_from_slice(d), None => buf.fill(0) }
+                Ok(buf.len())
+            }
+        }
+        for (real, finding) in [(62_000_000_000, Finding::Genuine), (8 * GIB, Finding::Fake)] {
+            let clock = Clock::simulated();
+            let mut d = SlowFlash { clock: clock.clone(), data: Default::default(), writes: 0, real };
+            let (step, points) = grid(d.len(), 4096, 1024);
+            let claimed = d.len();
+            let r = run_inner(&mut d, points, step, claimed, "raw", None, &clock, &Ctx::new()).unwrap();
+            assert!(r.seconds < 450., "took {} s", r.seconds);
+            assert!(r.step > step && r.step.is_power_of_two() && r.positions.len() >= 64);
+            assert_eq!(r.finding, finding);
+            if finding == Finding::Fake { assert_eq!(r.usable, 8 * GIB); }
         }
     }
 

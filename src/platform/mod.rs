@@ -618,8 +618,10 @@ mod discard_tests {
 }
 
 fn discard_error(e: io::Error) -> io::Error {
+    // Windows: invalid function, not supported, and 326 "does not support file-level TRIM"
+    // (a USB SSD behind a bridge that does not pass TRIM through).
     #[cfg(windows)]
-    let unsupported = matches!(e.raw_os_error(), Some(1 | 50));
+    let unsupported = matches!(e.raw_os_error(), Some(1 | 50 | 326));
     #[cfg(unix)]
     let unsupported = matches!(e.raw_os_error(), Some(libc::EOPNOTSUPP | libc::ENOTTY));
     if unsupported { io::Error::new(io::ErrorKind::Unsupported, e) } else { e }

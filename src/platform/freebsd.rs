@@ -525,7 +525,8 @@ fn can_discard(path: &str) -> Option<bool> {
     #[repr(C)]
     struct Attr { name: [u8; 64], len: i32, value: [u64; 32] }
     let mut a = Attr { name: [0; 64], len: 4, value: [0; 32] };
-    a.name[..15].copy_from_slice(b"GEOM::candelete\0");
+    let name = b"GEOM::candelete\0";
+    a.name[..name.len()].copy_from_slice(name);
     let f = File::open(path).ok()?;
     let code = 0xc000_648eu64 | ((std::mem::size_of::<Attr>() as u64) << 16);
     if unsafe { libc::ioctl(f.as_raw_fd(), code as _, &mut a) } != 0 { return None; }

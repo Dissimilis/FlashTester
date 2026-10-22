@@ -16,6 +16,8 @@ $fails = 0
 Start-Transcript -Path $LogPath -Force | Out-Null
 
 function Run([string]$name, [int]$want, [string[]]$argv) {
+    # Windows PowerShell turns a native program's stderr into errors; only the exit code counts.
+    $ErrorActionPreference = 'Continue'
     $out = & $exe @argv 2>&1 | Out-String
     $code = $LASTEXITCODE
     $ok = $code -eq $want
@@ -64,6 +66,9 @@ attach vdisk
     Run 'raw verify' 0 @('verify', '--disk', "$n", '-q')
     Run 'surface scan' 0 @('scan', '--disk', "$n", '-q')
     Run 'iops (raw read)' 0 @('iops', '--disk', "$n", '--seconds', '1', '-q')
+    Run 'iops (raw write)' 0 @('iops', '--disk', "$n", '--write', '--destroy', '--seconds', '1', '-q')
+    Run 'diagnose needs --destroy' 2 @('diagnose', '--disk', "$n")
+    Run 'diagnose 2 min' 0 @('diagnose', '--disk', "$n", '--destroy', '--max-time', '2m', '-q')
     Run 'endurance 2 passes' 0 @('endurance', '--disk', "$n", '--destroy', '--size', '100M', '--passes', '2', '-q')
     Run 'fix to 1 GB' 0 @('fix', '--disk', "$n", '--size', '1G', '--fs', 'exfat', '--label', 'FIXED', '--destroy', '-q')
     $vol = Get-Partition -DiskNumber $n | Get-Volume | Select-Object -First 1

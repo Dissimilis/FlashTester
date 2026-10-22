@@ -926,9 +926,12 @@ impl Gui {
         egui::ScrollArea::vertical().id_salt("operation-list").max_height(h).show(&mut ui.new_child(UiBuilder::new().max_rect(left)), |ui| {
             self.test_list(ui, raw);
         });
-        ui.painter().rect(right, 6.0, k::PANEL, Stroke::new(1.0, k::LINE_CARD), StrokeKind::Inside);
-        self.test_detail(&mut ui.new_child(UiBuilder::new().max_rect(right.shrink(20.0))), raw);
-        ui.allocate_rect(Rect::from_min_size(avail.min, vec2(avail.width(), h)), Sense::hover());
+        // The panel grows (and the page scrolls) when its content is taller than the window.
+        let panel = ui.painter().add(egui::Shape::Noop);
+        let bottom = self.test_detail(&mut ui.new_child(UiBuilder::new().max_rect(right.shrink(20.0))), raw);
+        let right = right.with_max_y(right.bottom().max(bottom + 20.0));
+        ui.painter().set(panel, egui::epaint::RectShape::new(right, 6.0, k::PANEL, Stroke::new(1.0, k::LINE_CARD), StrokeKind::Inside));
+        ui.allocate_rect(Rect::from_min_max(avail.min, pos2(avail.right(), right.bottom())), Sense::hover());
     }
 
     /// True when the SMART button was clicked.
@@ -1168,10 +1171,11 @@ impl Gui {
         });
     }
 
-    fn test_detail(&mut self, ui: &mut egui::Ui, raw: bool) {
+    /// Returns the bottom edge of what it drew.
+    fn test_detail(&mut self, ui: &mut egui::Ui, raw: bool) -> f32 {
         if self.kind == Kind::Info {
             self.drive_details(ui);
-            return;
+            return ui.min_rect().bottom();
         }
         let inner = ui.max_rect();
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -1254,6 +1258,7 @@ impl Gui {
         if relaunch {
             self.relaunch(ui.ctx());
         }
+        ui.min_rect().bottom()
     }
 
     fn options(&mut self, ui: &mut egui::Ui) {

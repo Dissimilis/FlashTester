@@ -73,7 +73,7 @@ pub struct ProbeResult {
 impl ProbeResult {
     pub fn partial_summary(&self) -> String {
         let written = self.status.bytes().filter(|&s| s != b'?').count();
-        format!("Capacity probe partial: {} of {} points written; {} checked by both passes, the other written points by the final verification.", written, self.positions.len(), self.status.bytes().filter(|&s| s == b'o').count())
+        format!("Capacity probe partial: {} of {} points written, {} read back during the probe; the two-pass probe did not finish.", written, self.positions.len(), self.status.bytes().filter(|&s| s == b'o').count())
     }
     /// A written point in the upper half: without one, nothing was learned about fake capacity.
     pub fn reaches_upper_half(&self) -> bool {
@@ -178,7 +178,8 @@ fn pass(dev: &mut dyn Dev, pos: &[u64], order: &[usize], block: usize, ctx: &Ctx
         }
         ctx.progress(n as u64 + 1);
         let spent = clock.now() - t0;
-        if slow_after.is_some_and(|s| spent > s) && 2 * (n + 1) < order.len() {
+        // A restart thins the grid and could drop a position that already failed.
+        if slow_after.is_some_and(|s| spent > s) && 2 * (n + 1) < order.len() && !got.contains(&Got::IoErr) {
             return Err(io::Error::other(Slow(spent / (n + 1) as f64)));
         }
     }
@@ -725,13 +726,14 @@ mod tests {
 
     #[test]
     fn plain_probe_rethins_when_calibration_was_cached() {
-        struct SlowFlash { clock: Clock, data: std::collections::BTreeMap<u64, Vec<u8>>, writes: usize, real: u64 }
+        struct SlowFlash { clock: Clock, data: std::collections::BTreeMap<u64, Vec<u8>>, writes: usize, real: u64, fail_at: Option<u64> }
         impl Dev for SlowFlash {
             fn len(&self) -> u64 { 62_000_000_000 }
             fn flush(&mut self) -> io::Result<()> { Ok(()) }
             fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
                 self.clock.sleep(if self.writes < 24 { 0.001 } else { 1. });
                 self.writes += 1;
+                if self.fail_at == Some(off) { return Err(io::Error::other("write failed")); }
                 self.data.insert(off % self.real, buf.to_vec());
                 Ok(())
             }
@@ -741,15 +743,20 @@ mod tests {
                 Ok(buf.len())
             }
         }
-        for (real, finding) in [(62_000_000_000, Finding::Genuine), (8 * GIB, Finding::Fake)] {
+        // A write error seen before the restart must survive it (the 25th 64 MiB
+        // point is not on the coarser grid).
+        let fail = 25 * 64 * MIB;
+        for (real, fail_at, finding) in [(62_000_000_000, None, Finding::Genuine), (8 * GIB, None, Finding::Fake), (62_000_000_000, Some(fail), Finding::Defective)] {
             let clock = Clock::simulated();
-            let mut d = SlowFlash { clock: clock.clone(), data: Default::default(), writes: 0, real };
+            let mut d = SlowFlash { clock: clock.clone(), data: Default::default(), writes: 0, real, fail_at };
             let (step, points) = grid(d.len(), 4096, 1024);
+            assert!(points.contains(&fail) && step == 64 * MIB);
             let claimed = d.len();
             let r = run_inner(&mut d, points, step, claimed, "raw", None, &clock, &Ctx::new()).unwrap();
+            assert_eq!(r.finding, finding);
+            if fail_at.is_some() { assert!(r.positions.contains(&fail)); continue; }
             assert!(r.seconds < 450., "took {} s", r.seconds);
             assert!(r.step > step && r.step.is_power_of_two() && r.positions.len() >= 64);
-            assert_eq!(r.finding, finding);
             if finding == Finding::Fake { assert_eq!(r.usable, 8 * GIB); }
         }
     }

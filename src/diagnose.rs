@@ -732,7 +732,7 @@ pub fn interpret_stalls(stalls: &[Stall]) -> String {
     if times.windows(4).any(|w| w[3].at - w[0].at <= 120. && w.windows(2).all(|p| p[1].seconds >= p[0].seconds * 1.25)) {
         "Throttling or power problem: speed may degrade in long use.".into()
     } else if stalls.len() >= 10 {
-        format!("Frequent pauses ({} of 2 s or longer) across the disk, not in one region; the speeds above include them.", stalls.len())
+        format!("Frequent pauses ({} of 2 s or longer); the speeds above include them.", stalls.len())
     } else { "Random hiccups, likely harmless; no repeatable region or worsening time pattern.".into() }
 }
 
@@ -1198,7 +1198,10 @@ fn finish_verdict(r: &mut Diagnostics) {
         Status::Unreliable => "Problems found: the drive or its connection reported errors.",
         _ => "Incomplete: the budget ended before all diagnostic checks finished.",
     }.into(); }
-    if let Some(p) = &r.probe && p.partial { r.warnings.push(p.partial_summary()); }
+    if let Some(p) = &r.probe && p.partial {
+        // final_checks reads back every written probe point; it completes only if all held.
+        r.warnings.push(p.partial_summary() + if r.final_complete { " The final verification read back every written point." } else { "" });
+    }
     if r.triage_failing { r.warnings.push("SMART was already reporting failure; only the probe and a small verified sample were run.".into()); }
     if r.reads_freeze { r.warnings.push("Bulk storage only: it freezes reads while writing.".into()); }
     if r.link_limited { r.warnings.push("The measured speed is at the USB 2 ceiling (about 35-40 MB/s); this port limits speed.".into()); }
@@ -2330,7 +2333,12 @@ mod later_tests {
         finish_verdict(&mut r);
         assert_eq!(r.status, Status::Ok);
         assert_eq!(r.status.exit_code(), 0);
-        assert!(r.warnings.iter().any(|w| w == "Capacity probe partial: 2 of 2 points written; 1 checked by both passes, the other written points by the final verification."));
+        assert!(r.warnings.iter().any(|w| w == "Capacity probe partial: 2 of 2 points written, 1 read back during the probe; the two-pass probe did not finish. The final verification read back every written point."));
+        let mut unfinished = good.clone();
+        unfinished.final_complete = false;
+        finish_verdict(&mut unfinished);
+        assert_eq!(unfinished.status, Status::Info);
+        assert!(unfinished.warnings.iter().any(|w| w.ends_with("the two-pass probe did not finish.")));
         // A probe that never reached the upper half says nothing about fake capacity.
         let mut low = good.clone();
         low.probe.as_mut().unwrap().status = "o?".into();

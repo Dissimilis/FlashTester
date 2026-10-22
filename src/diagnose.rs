@@ -716,10 +716,13 @@ fn mixed_read(dev: &mut dyn Dev, pat: Pattern, rng: &mut u64, previous: &mut Opt
 /// No attribution from one or two pauses; position repetition needs distinct phases.
 pub fn interpret_stalls(stalls: &[Stall]) -> String {
     if stalls.len() < 3 { return if stalls.is_empty() { "No stalls of 2 s or longer." } else { "Too few stalls to attribute a cause." }.into(); }
+    // A drive that pauses everywhere also pauses where each phase starts: a region
+    // must hold most of the positional stalls.
+    let positional = stalls.iter().filter(|x| x.offset.is_some()).count();
     for s in stalls {
         let Some(off) = s.offset else { continue; };
         let same: Vec<_> = stalls.iter().filter(|x| x.offset.is_some_and(|p| p / MIB == off / MIB)).collect();
-        if same.len() >= 3 && same.iter().any(|x| x.phase != s.phase) {
+        if same.len() >= 3 && same.len() * 2 > positional && same.iter().any(|x| x.phase != s.phase) {
             return format!("Bad regions near {}: stalls repeated here across phases.", crate::report::size(off / MIB * MIB));
         }
     }
@@ -728,6 +731,8 @@ pub fn interpret_stalls(stalls: &[Stall]) -> String {
     // Healthy sticks pause for 2-4 s at random; only a steady rise points at heat or power.
     if times.windows(4).any(|w| w[3].at - w[0].at <= 120. && w.windows(2).all(|p| p[1].seconds >= p[0].seconds * 1.25)) {
         "Throttling or power problem: speed may degrade in long use.".into()
+    } else if stalls.len() >= 10 {
+        format!("Frequent pauses ({} of 2 s or longer) across the disk, not in one region; the speeds above include them.", stalls.len())
     } else { "Random hiccups, likely harmless; no repeatable region or worsening time pattern.".into() }
 }
 
@@ -1183,7 +1188,7 @@ fn finish_verdict(r: &mut Diagnostics) {
     if r.status.exit_code() != 1 {
         r.status = if r.triage_failing || !r.identity_changes.is_empty() || r.smart.as_ref().is_some_and(|s| s.changes.iter().any(|c| c.what.bad() && c.after > c.before)) { Status::Unreliable }
             else if r.tally.lost() > 0 { if r.tally.aliased > 0 { Status::Fake } else { Status::Defective } }
-            else if r.final_complete && r.probe.is_some() && r.written > 0 { Status::Ok } else { Status::Info };
+            else if r.final_complete && r.probe.as_ref().is_some_and(|p| p.reaches_upper_half()) && r.written > 0 { Status::Ok } else { Status::Info };
     }
     if r.reason.is_empty() { r.reason = match r.status {
         Status::Ok => "Genuine in the samples tested. No data loss or failure was found; a full test is needed to check every byte.",
@@ -1209,6 +1214,11 @@ fn finish_verdict(r: &mut Diagnostics) {
 mod tests {
     use super::*;
     use crate::dev::{CacheDev, MemDev, SimMode};
+
+    /// A probe that wrote a point in the upper half, so an OK verdict is possible.
+    pub(super) fn covered_probe() -> ProbeResult {
+        ProbeResult { claimed: 2 * GB, positions: vec![0, GB], status: "ow".into(), partial: true, ..Default::default() }
+    }
 
     fn limits(class: DriveClass, size: u64) -> Limits {
         Limits { block: 64 * 1024, check_every: MIB, mark_every: 128 * 1024, ..Limits::new(class, size, 4096, None) }
@@ -1268,7 +1278,7 @@ mod tests {
         }
         let last = watch.samples.last().unwrap();
         let mut d = Diagnostics { written: last.offset + last.bytes, drop_at: found, post_mb_s: watch.after(),
-            trim: "unsupported".into(), baseline_read_mb_s: Some(100.), final_complete: true, probe: Some(Default::default()), ..Default::default() };
+            trim: "unsupported".into(), baseline_read_mb_s: Some(100.), final_complete: true, probe: Some(covered_probe()), ..Default::default() };
         watch.update(&mut d);
         finish_verdict(&mut d);
         assert_eq!(d.drop_at, found); // The final consistency guard must retain genuine drops.
@@ -1356,7 +1366,7 @@ mod tests {
         }
         assert!(watch.after().unwrap() > watch.peak);
         let mut measured = Diagnostics { written: 150 * 8192, drop_at: found, drop_confirmed_at: Some(50 * 8192), post_mb_s: watch.after(),
-            final_complete: true, probe: Some(Default::default()), read_mb_s: Some(77.), trim: "unsupported".into(), ..Default::default() };
+            final_complete: true, probe: Some(covered_probe()), read_mb_s: Some(77.), trim: "unsupported".into(), ..Default::default() };
         watch.update(&mut measured);
         measured.tally.ok = 42;
         for status in [Status::Ok, Status::Unreliable, Status::Cancelled] {
@@ -2303,15 +2313,29 @@ mod later_tests {
         for (s, secs) in stalls.iter_mut().zip([2., 3., 4., 6.]) { s.seconds = secs; }
         stalls[3].at = 900.;
         assert!(interpret_stalls(&stalls).contains("Random hiccups"));
+        // SMI, 2026-10-22: every phase starts at 0 on a drive that stalls everywhere.
+        let smi: Vec<_> = [(0, 4.0), (17, 3.0), (25, 4.0), (34, 4.0), (51, 2.9), (60, 4.0), (0, 4.0), (8, 2.9), (12, 4.0), (17, 4.0)].iter().enumerate()
+            .map(|(i, &(gb, secs))| Stall { phase: "Capacity probe".into(), offset: Some(gb * GB), at: i as f64 * 4., seconds: secs, ..Default::default() })
+            .chain((0..4).map(|i| Stall { phase: "Sequential write".into(), offset: Some(0), at: 50. + i as f64 * 4., seconds: [11.9, 2.9, 4.0, 4.0][i], ..Default::default() }))
+            .collect();
+        assert!(interpret_stalls(&smi).starts_with("Frequent pauses (14"), "{}", interpret_stalls(&smi));
+        // The same stalls without the spread elsewhere do point at the start of the disk.
+        assert!(interpret_stalls(&[&smi[..1], &smi[6..7], &smi[10..]].concat()).contains("Bad regions near 0 B"));
     }
 
     #[test]
     fn warnings_do_not_become_failed_verdicts() {
-        let good = Diagnostics { final_complete: true, probe: Some(ProbeResult::default()), written: MIB, trim: "unsupported".into(), reads_freeze: true, link_limited: true, ..Default::default() };
+        let good = Diagnostics { final_complete: true, probe: Some(super::tests::covered_probe()), written: MIB, trim: "unsupported".into(), reads_freeze: true, link_limited: true, ..Default::default() };
         let mut r = good.clone();
         finish_verdict(&mut r);
         assert_eq!(r.status, Status::Ok);
         assert_eq!(r.status.exit_code(), 0);
+        assert!(r.warnings.iter().any(|w| w == "Capacity probe partial: 2 of 2 points written; 1 checked by both passes, the other written points by the final verification."));
+        // A probe that never reached the upper half says nothing about fake capacity.
+        let mut low = good.clone();
+        low.probe.as_mut().unwrap().status = "o?".into();
+        finish_verdict(&mut low);
+        assert_eq!(low.status, Status::Info);
         assert!(r.warnings.iter().any(|w| w.contains("Bulk storage")));
         for problem in 0..5 {
             let mut r = good.clone();

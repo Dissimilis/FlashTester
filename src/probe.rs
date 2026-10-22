@@ -72,7 +72,12 @@ pub struct ProbeResult {
 
 impl ProbeResult {
     pub fn partial_summary(&self) -> String {
-        format!("Capacity probe partial: {} of {} points verified; the two-pass probe did not finish.", self.status.bytes().filter(|&s| s == b'o').count(), self.positions.len())
+        let written = self.status.bytes().filter(|&s| s != b'?').count();
+        format!("Capacity probe partial: {} of {} points written; {} checked by both passes, the other written points by the final verification.", written, self.positions.len(), self.status.bytes().filter(|&s| s == b'o').count())
+    }
+    /// A written point in the upper half: without one, nothing was learned about fake capacity.
+    pub fn reaches_upper_half(&self) -> bool {
+        self.positions.iter().zip(self.status.bytes()).any(|(&pos, s)| s != b'?' && pos >= self.claimed / 2)
     }
     pub fn summary_lines(&self) -> Vec<String> {
         let mut v = vec![format!(

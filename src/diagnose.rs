@@ -46,6 +46,7 @@ pub fn failing(s: &Smart) -> bool {
 pub struct Limits {
     pub phases: [f64; 7],
     pub total: f64,
+    pub short: bool,
     pub seq_cap: u64,
     pub write_cap: u64,
     pub block: usize,
@@ -60,12 +61,23 @@ impl Limits {
         let total = max_time.unwrap_or(default);
         // Extra time belongs to sequential writes. Final verification is reserved first.
         phases[3] += (total - default).max(0.0);
-        Self { phases, total, seq_cap: (size / 5 * 2) / align * align, write_cap: (size / 2) / align * align,
+        // A shorter budget shrinks every phase alike, except that the probe keeps up to 30 %.
+        let short = total < default;
+        if short {
+            let probe = phases[2].min(total * 0.3);
+            let scale = (total - probe) / (default - phases[2]);
+            for p in &mut phases { *p *= scale; }
+            phases[2] = probe;
+        }
+        Self { phases, total, short, seq_cap: (size / 5 * 2) / align * align, write_cap: (size / 2) / align * align,
             block: (4 * MIB) as usize, check_every: GB / align * align, mark_every: 256 * MIB }
     }
     fn end(&self, phase: usize, now: f64) -> f64 {
         let reserve = if phase == 6 { 0. } else { self.phases[6].min(self.total) };
-        (now + self.phases[phase]).min((self.total - reserve).max(0.0))
+        // In a short run, time the earlier phases left over goes to sequential writes.
+        let own = if self.short && phase == 3 { self.total } else { now + self.phases[phase] };
+        let later = if self.short && phase == 3 { self.phases[4] + self.phases[5] } else { 0. };
+        own.min((self.total - reserve - later).max(0.0))
     }
 }
 
@@ -243,6 +255,7 @@ impl Diagnostics {
         else if self.recovery.is_empty() { lines.push("Cache recovery: insufficient time or unused space within the write cap.".into()); }
         for r in &self.recovery {
             lines.push(if r.full { format!("Fast writes fully recover within {:.0} s idle ({} at {:.1} MB/s).", r.idle_seconds, size(r.fast_bytes), r.mb_s) }
+                else if r.fast_bytes == 0 { format!("After {:.0} s idle, no fast writes came back.", r.idle_seconds) }
                 else { format!("After {:.0} s idle, {}{} was fast again at {:.1} MB/s{}.", r.idle_seconds, if r.lower_bound { "at least " } else { "" }, size(r.fast_bytes), r.mb_s, if r.lower_bound { " (attempt capped)" } else { "" }) });
         }
         lines.push(format!("Sequential read: {}.", self.read_mb_s.map(|v| format!("{v:.1} MB/s, verified")).unwrap_or_else(|| "not measured".into())));
@@ -358,8 +371,10 @@ impl DropWatch {
         }
         // A lasting lower level also counts. Require several samples so one
         // long pause cannot masquerade as a lower plateau; bursts reset the hold.
+        // Very slow writes complete rarely: three of them over 20 s also count.
         let low = (end..n).rfind(|&i| self.samples[i].mb_s > before * 0.85).map_or(end, |i| i + 1);
-        if self.confirmed.is_none() && n - low >= 5 {
+        let lasting = n - low >= 5 || (n - low >= 3 && self.time(n) - self.time(low) >= 20.);
+        if self.confirmed.is_none() && lasting {
             for (fraction, hold) in [(0.75, 10.), (0.85, 20.)] {
                 let mut since = None;
                 for j in low + 1..=n {
@@ -710,7 +725,8 @@ pub fn interpret_stalls(stalls: &[Stall]) -> String {
     }
     let mut times: Vec<_> = stalls.iter().collect();
     times.sort_by(|a,b| a.at.total_cmp(&b.at));
-    if times.windows(3).any(|w| w[2].at - w[0].at <= 60. && w[0].seconds < w[1].seconds && w[1].seconds < w[2].seconds) {
+    // Healthy sticks pause for 2-4 s at random; only a steady rise points at heat or power.
+    if times.windows(4).any(|w| w[3].at - w[0].at <= 120. && w.windows(2).all(|p| p[1].seconds >= p[0].seconds * 1.25)) {
         "Throttling or power problem: speed may degrade in long use.".into()
     } else { "Random hiccups, likely harmless; no repeatable region or worsening time pattern.".into() }
 }
@@ -1256,7 +1272,7 @@ mod tests {
         watch.update(&mut d);
         finish_verdict(&mut d);
         assert_eq!(d.drop_at, found); // The final consistency guard must retain genuine drops.
-        assert!(!d.warnings.iter().any(|s| s.contains("very slow")));
+        assert_eq!(d.warnings.iter().any(|s| s.contains("very slow")), measured < 5.);
         if expectation.contains("sawtooth") && !expected_drop {
             assert_eq!(d.write_pattern, "bursts with regular pauses");
             assert!(d.summary_lines().iter().any(|s| s.contains("cache may not have recovered")));
@@ -1295,6 +1311,9 @@ mod tests {
     fn trace_lexar_r3() { hardware_trace("lexar_r3", (24., 30.), (35., 45.), None); }
     #[test]
     fn trace_wd_ssd_p4() { hardware_trace("wd_ssd_p4", (340., 360.), (340., 360.), None); }
+
+    #[test]
+    fn trace_smi_gc_2m() { hardware_trace("smi_gc_2m", (80., 90.), (0.2, 1.), Some((150., 200.))); }
 
     #[test]
     fn trace_wd_ssd_fedora_30m() { hardware_trace("wd_ssd_fedora_30m", (825., 845.), (360., 420.), Some((554_000., 555_000.))); }
@@ -1516,9 +1535,19 @@ mod tests {
         assert_eq!(a.end(3, 1700.), 1730.);
         assert_eq!(a.end(6, 1730.), 1800.);
         assert!(a.seq_cap <= 40 * GB && a.write_cap <= 50 * GB);
-        let b = Limits::new(DriveClass::Usb, 100 * GB, 4096, Some(30.));
-        assert_eq!(b.end(3, 0.), 0.);
-        assert_eq!(b.end(6, 0.), 30.);
+        // Short budgets: the probe keeps 30 %, the other phases shrink alike, all within the total.
+        let b = Limits::new(DriveClass::Usb, 100 * GB, 4096, Some(120.));
+        assert_eq!(b.phases[2], 36.);
+        assert!((b.phases.iter().sum::<f64>() - 120.).abs() < 1e-9);
+        assert!((b.phases[6] - 75. * 84. / 540.).abs() < 1e-9);
+        let seq_end = 120. - b.phases[4] - b.phases[5] - b.phases[6];
+        // Sequential writes take what the probe left over, but not the later phases' share.
+        assert!((b.end(3, 10.) - seq_end).abs() < 1e-9);
+        assert!((b.end(3, 40.) - seq_end).abs() < 1e-9);
+        assert_eq!(b.end(6, 100.), 100. + b.phases[6]);
+        let c = Limits::new(DriveClass::Usb2, 100 * GB, 4096, Some(120.));
+        assert_eq!(c.phases[2], 25.);
+        assert!(c.end(3, 30.) > 30.);
     }
 
     #[test]
@@ -1882,7 +1911,7 @@ mod later_tests {
         assert_eq!(run.r.stalls.len(), 3);
         assert!(run.r.stalls.iter().all(|s| s.offset.is_none()));
         assert!(!interpret_stalls(&run.r.stalls).contains("Bad regions"));
-        assert!(interpret_stalls(&run.r.stalls).contains("Throttling"));
+        assert!(interpret_stalls(&run.r.stalls).contains("Random hiccups"));
         let mut r = report(&DiskInfo::default(), run.r);
         assert!(r.text().contains("no disk position"));
         assert!(r.html().contains("no disk position"));
@@ -1983,6 +2012,9 @@ mod later_tests {
         assert!(r.summary_lines().iter().any(|l| l.contains("may be understated")));
         r.trim = "effective in the sample".into();
         assert!(!r.summary_lines().iter().any(|l| l.contains("may be understated")));
+        r.drop_at = Some(MIB);
+        r.recovery = vec![Recovery { idle_seconds: 3., ..Default::default() }];
+        assert!(r.summary_lines().iter().any(|l| l == "After 3 s idle, no fast writes came back."));
     }
 
     #[test]
@@ -2262,9 +2294,14 @@ mod later_tests {
         assert!(interpret_stalls(&stalls).contains("Too few"));
         stalls.push(Stall { phase: "read".into(), offset: Some(2 * MIB), at: 40., seconds: 3., ..Default::default() });
         assert!(interpret_stalls(&stalls).contains("Bad regions"));
-        for (i,s) in stalls.iter_mut().enumerate() { s.offset = Some(i as u64 * MIB); s.at = i as f64 * 10.; s.seconds = 2. + i as f64; }
+        stalls.push(stalls[2].clone());
+        for (i,s) in stalls.iter_mut().enumerate() { s.offset = Some(i as u64 * MIB); s.at = i as f64 * 30.; s.seconds = [2., 3., 4., 6.][i]; }
         assert!(interpret_stalls(&stalls).contains("Throttling"));
-        stalls[2].at = 900.;
+        // Noise from a healthy stick (Verbatim, 2026-10-21): rising, but not steadily.
+        for (s, secs) in stalls.iter_mut().zip([2.4, 2.4, 3.1, 4.7]) { s.seconds = secs; }
+        assert!(interpret_stalls(&stalls).contains("Random hiccups"));
+        for (s, secs) in stalls.iter_mut().zip([2., 3., 4., 6.]) { s.seconds = secs; }
+        stalls[3].at = 900.;
         assert!(interpret_stalls(&stalls).contains("Random hiccups"));
     }
 

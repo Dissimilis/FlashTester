@@ -1,4 +1,4 @@
-//! GUI front-end (egui). A thin shell over `app`: pick a drive and a test,
+﻿//! GUI front-end (egui). A thin shell over `app`: pick a drive and a test,
 //! watch progress, read the verdict, save reports. The drive list stays on the
 //! left; the main area switches between setup, run and result views.
 
@@ -190,7 +190,7 @@ impl Kind {
             Kind::Scan => "Read checks",
             Kind::Diagnose => "Recommended",
             Kind::Test | Kind::Probe | Kind::Verify => "Capacity and data loss",
-            Kind::Bench | Kind::Iops => "Speed",
+            Kind::Bench | Kind::Iops => "速度",
             Kind::Endurance | Kind::SmallFiles | Kind::PlugPull => "Reliability",
             Kind::Fix => "Formatting",
         }
@@ -687,7 +687,7 @@ impl Gui {
         let locked = self.running.is_some();
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 44.0), Layout::left_to_right(Align::Center), |ui| {
             ui.add_space(16.0);
-            ui.label(k::medium("Drives", 16.0, k::TEXT));
+            ui.label(k::medium("磁盘", 16.0, k::TEXT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(12.0);
                 if k::icon_button(ui, Icon::Refresh, "Refresh", !locked, if locked { 0.35 } else { 1.0 }).on_hover_text("Refresh").clicked() {
@@ -964,12 +964,12 @@ impl Gui {
         let mut smart = false;
         let usb = d.usb.as_ref();
         let items = [
-            ("Device", d.name(), device_sub(d), false),
+            ("设备", d.name(), device_sub(d), false),
             ("Serial number", if d.serial.is_empty() { "(none)".into() } else { d.serial.clone() }, String::new(), d.placeholder_serial.is_some()),
             ("Reported capacity", size(d.size), format!("{} bytes", digits(d.size)), false),
             ("USB ID", usb.map(|u| format!("{}:{}", u.vid, u.pid)).unwrap_or_else(|| "-".into()), usb.map(usb_sub).unwrap_or_default(), false),
             ("Connection", usb.map(|u| u.link.clone()).filter(|l| !l.is_empty()).unwrap_or_else(|| d.bus.clone()), String::new(), usb.is_some_and(|u| u.slow_link)),
-            ("Firmware", if d.revision.is_empty() { "Not reported".into() } else { d.revision.clone() }, String::new(), false),
+            ("固件", if d.revision.is_empty() { "Not reported".into() } else { d.revision.clone() }, String::new(), false),
         ];
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
@@ -1020,7 +1020,7 @@ impl Gui {
         let d = v.disk.clone();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            back = k::button(ui, Look::Secondary, None, "Back", 30.0, 13.0, true).clicked();
+            back = k::button(ui, Look::Secondary, None, "返回", 30.0, 13.0, true).clicked();
             if admin {
                 again = k::icon_button(ui, Icon::Refresh, "Read again", v.rx.is_none(), 1.0).on_hover_text("Read again").clicked();
             }
@@ -1307,7 +1307,7 @@ impl Gui {
             Kind::Fix => {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;
-                    ui.label(k::text("File system", 12.0, k::TEXT2));
+                    ui.label(k::text("文件系统", 12.0, k::TEXT2));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 16.0;
                         for f in crate::fix::FILESYSTEMS {
@@ -1472,7 +1472,7 @@ impl Gui {
         let mut rc = ui.new_child(UiBuilder::new().max_rect(right).layout(Layout::bottom_up(Align::Max)));
         rc.spacing_mut().item_spacing.y = 12.0;
         rc.add_space(6.0);
-        cancel |= k::button(&mut rc, Look::Secondary, Some(Icon::Stop), "Cancel", 34.0, 13.0, true).clicked();
+        cancel |= k::button(&mut rc, Look::Secondary, Some(Icon::Stop), "取消", 34.0, 13.0, true).clicked();
         let bad = s.marks.len();
         if bad == 0 {
             k::chip(&mut rc, Some(Icon::Check), "0 errors", 34.0, 18.0, k::OK_TINT, k::OK_STROKE, k::OK_TEXT);
@@ -1529,15 +1529,15 @@ impl Gui {
             };
             (what, pair(s.done, s.total))
         } else if s.total > 0 {
-            ("Done", format!("{} / {}", s.done, s.total))
+            ("完成", format!("{} / {}", s.done, s.total))
         } else {
             ("Phase", s.phase.split(" (").next().unwrap_or_default().to_string())
         };
         let (speed_label, speed) = match self.running.as_ref().and_then(|r| r.prompt_since) {
             Some(t) => ("Waiting", clock(t.elapsed().as_secs_f64())),
-            None if el > 1.0 && bytes => ("Speed", format!("{:.1} MB/s", s.done as f64 / 1e6 / el)),
-            None if el > 1.0 && s.total > 0 => ("Speed", format!("{:.0}/s", s.done as f64 / el)),
-            None => ("Speed", "–".into()),
+            None if el > 1.0 && bytes => ("速度", format!("{:.1} MB/s", s.done as f64 / 1e6 / el)),
+            None if el > 1.0 && s.total > 0 => ("速度", format!("{:.0}/s", s.done as f64 / el)),
+            None => ("速度", "–".into()),
         };
         let eta =
             if s.done > 0 && el > 2.0 && s.total > 0 && !waiting { crate::report::duration(el * s.total.saturating_sub(s.done) as f64 / s.done as f64) } else { "–".into() };
@@ -1778,7 +1778,7 @@ impl Gui {
         let word = st.label();
         let size = if word.len() > 6 { 22.0 } else { 34.0 };
         let wr = k::paint_medium(p, col.center() + vec2(0.0, 8.0), Align2::CENTER_CENTER, word, size, ink);
-        k::paint_medium(p, pos2(col.center().x, wr.top() - 2.0), Align2::CENTER_BOTTOM, "Verdict", 11.0, ink.gamma_multiply(0.8));
+        k::paint_medium(p, pos2(col.center().x, wr.top() - 2.0), Align2::CENTER_BOTTOM, "结论", 11.0, ink.gamma_multiply(0.8));
         act
     }
 }

@@ -154,7 +154,7 @@ On Linux use a mount point and a kernel name (`test /media/you/STICK`, `--disk s
 | `clean E:` | Delete FlashTester's test data | no |
 | `render result.json --html r.html` | Turn a saved JSON result into an HTML report / `--evidence-out` sheet | no |
 
-Options for every command: `--json` (result on stdout), `--report file.html|file.json`, `--evidence file.html`, `-q` (no progress).
+Options for every command: `--json` (result on stdout), `--report file.html|file.json`, `--evidence file.html`, `--hide-serial` (leave serial numbers out of everything printed or saved, for sharing a report), `-q` (no progress).
 
 For `backup` and `restore`, report and evidence paths must be new files. This prevents a report from replacing a backup, its manifest or another existing file. Use a different report filename for each run. If saving a report fails, the command returns exit code 3 even when the backup or restore itself completed; the printed result shows both outcomes.
 
@@ -166,7 +166,7 @@ Choose **Quick diagnostics** on a whole disk in the GUI, or run `flashtester dia
 
 The run checks sampled capacity, watches sequential writes for a sustained slowdown, measures mixed small writes and random 4K I/O, and checks whether reads freeze during writes. When a slowdown appears, it tests recovery after idle and compares read speed and available temperatures. Failed writes, mismatches or SMART errors stop the run; speed warnings alone do not fail it.
 
-Sequential writes cover at most 40% of the disk; all test writes together cover at most 50% of distinct addresses. These caps do not make the operation safe for existing data: discard affects the whole disk. Cache size and recovery are estimates, qualified when TRIM is unavailable or heat may explain the slowdown. A blocked operating-system call can overrun the time limit. Use the full test to check every byte. Quick diagnostics has simulated-drive tests; its new discard and timing paths have not yet been validated on hardware.
+Sequential writes cover at most 40% of the disk; all test writes together cover at most 50% of distinct addresses. These caps do not make the operation safe for existing data: discard affects the whole disk. Cache size and recovery are estimates, qualified when TRIM is unavailable or heat may explain the slowdown. A blocked operating-system call can overrun the time limit. Use the full test to check every byte. Quick diagnostics was run on USB 2 and USB 3 sticks and a USB SSD with TRIM on Linux, on USB sticks in a Windows 11 virtual machine and on VHDs, and on emulated USB, SATA and NVMe disks under FreeBSD; internal SATA and NVMe drives have not been tested on hardware yet.
 
 ### Flash identification
 

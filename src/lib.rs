@@ -1,4 +1,4 @@
-pub mod app;
+﻿pub mod app;
 pub mod backup;
 pub mod cli;
 pub mod ctx;
@@ -17,6 +17,9 @@ pub mod report;
 pub mod scan;
 pub mod smart;
 pub mod trust;
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
+pub mod zhopfont;
+
 #[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 pub mod gui;
 #[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]

@@ -1,0 +1,35 @@
+﻿name: build-zh
+
+on:
+  push:
+    branches: [zh-CN]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-zh:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (GNU toolchain)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --component llvm-tools
+          rustup default stable-x86_64-pc-windows-gnu
+      - name: Build (zh-CN GUI)
+        run: cargo build --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashtester-zh
+          path: target/release/flashtester.exe
+      - name: Release (zh-CN)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: zh-CN-latest
+          name: FlashTester 中文版 (zh-CN)
+          prerelease: true
+          files: target/release/flashtester.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -116,8 +116,6 @@ pub fn tr(s: &str) -> &str {
         _ => s,
     }
 }
-//! widgets (buttons, choice rows, checkboxes) the design needs.
-
 use egui::epaint::CornerRadius;
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2};

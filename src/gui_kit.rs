@@ -1,6 +1,121 @@
-//! GUI look: colour tokens, the global egui style, painted icons and the few custom
+﻿//! GUI look: colour tokens, the global egui style, painted icons and the few custom
 //! widgets (buttons, choice rows, checkboxes) the design needs.
+//!
+//! Chinese (zh-CN) localization: a static translation table `tr()` is applied to the
+//! short UI strings passed through the `text`/`medium`/`light`/`mono` helpers, and a
+//! system CJK font is loaded as a fallback so Chinese glyphs render.
 
+/// Chinese (zh-CN) localization. Maps selected English UI strings to Chinese.
+/// Only static strings are translated; anything containing `{}` (format args) is
+/// left untouched so `format!` placeholders keep working.
+pub fn tr(s: &str) -> &str {
+    if s.contains('{') {
+        return s;
+    }
+    match s {
+        // --- drive list / selection ---
+        "Select a drive to test" => "选择要测试的磁盘",
+        "Drive selection locked during test" => "测试期间磁盘选择已锁定",
+        "details and tests" => "详情与测试",
+        "Drive details" => "磁盘详情",
+        "Volume: file mode" => "卷：文件模式",
+        "Whole disk: raw mode" => "整盘：原始模式",
+        "Read only" => "只读",
+        "File mode" => "文件模式",
+        "Raw mode" => "原始模式",
+        "All" => "全部",
+        "Refresh" => "刷新",
+        "Refresh details" => "刷新详情",
+        "Choose another drive" => "选择其他磁盘",
+        "Back to menu" => "返回菜单",
+        "Select a drive" => "选择磁盘",
+        // --- operation groups & kinds ---
+        "Backup and restore" => "备份与还原",
+        "Information" => "信息",
+        "Read checks" => "只读检查",
+        "Recommended" => "推荐",
+        "Capacity and data loss" => "容量与数据丢失",
+        "Create backup" => "创建备份",
+        "Restore backup" => "还原备份",
+        "Restore files" => "还原文件",
+        "Full test" => "完整测试",
+        "Repeated write test" => "重复写入测试",
+        "Check saved test data" => "校验已保存的测试数据",
+        "Quick capacity check" => "快速容量检测",
+        "Quick diagnostics" => "快速诊断",
+        "Read scan" => "读取扫描",
+        "Random 4 KiB speed" => "随机 4 KiB 速度",
+        "Small files" => "小文件",
+        "Pull-the-plug test" => "拔盘断电测试",
+        "Resize and format" => "调整大小并格式化",
+        "Sequential speed" => "顺序速度",
+        "Start full test" => "开始完整测试",
+        "Start repeated test" => "开始重复测试",
+        "Check test data" => "校验测试数据",
+        "Check capacity" => "检测容量",
+        "Start diagnostics" => "开始诊断",
+        "Start scan" => "开始扫描",
+        "Start random I/O test" => "开始随机 I/O 测试",
+        "Start small file test" => "开始小文件测试",
+        "Start pull-the-plug test" => "开始拔盘断电测试",
+        "Start speed test" => "开始速度测试",
+        // --- setup / run panel ---
+        "Operation details" => "操作详情",
+        "Test size" => "测试大小",
+        "Scan size" => "扫描大小",
+        "Size limit" => "大小上限",
+        "File system" => "文件系统",
+        "Next step" => "下一步",
+        "Follow the steps above to continue the test" => "按上面的步骤继续测试",
+        "Reconnect the drive before checking data" => "校验数据前请重新连接磁盘",
+        "Tests free space only" => "仅测试空闲空间",
+        "Tests across the whole disk" => "跨整盘测试",
+        "Whole disk" => "整盘",
+        "Read again" => "再次读取",
+        "Check data" => "校验数据",
+        "Check flushed data" => "校验已写入数据",
+        "Run full test again" => "再次运行完整测试",
+        "Estimated time left" => "预计剩余时间",
+        "Reported capacity" => "标称容量",
+        "Leave blank to test all available space. Examples: 8G, 500M" => "留空则测试全部可用空间。例如：8G、500M",
+        "Leave blank for a short 256 MiB check. Examples: 1G, 500M" => "留空则进行 256 MiB 的简短检查。例如：1G、500M",
+        "Leave blank to read the whole disk. Examples: 4G, 500M" => "留空则读取整个磁盘。例如：4G、500M",
+        "Leave blank for 1 GiB. Examples: 4G, 500M" => "留空则为 1 GiB。例如：4G、500M",
+        "Capacity, cache, speed and stalls in about 10 minutes" => "约 10 分钟测出容量、缓存、速度与卡顿",
+        "Hide serial numbers" => "隐藏序列号",
+        "Hide serial numbers in saved reports" => "在保存的报告中隐藏序列号",
+        "Running at USB 2 speed or slower" => "运行在 USB 2 或更低速度",
+        // --- result / report ---
+        "Final block map" => "最终块图",
+        "Block map" => "块图",
+        "Save report" => "保存报告",
+        "Save detailed report" => "保存详细报告",
+        "Save summary" => "保存摘要",
+        "Save evidence sheet" => "保存证据单",
+        "Open file" => "打开文件",
+        "Open folder" => "打开文件夹",
+        "Copy details" => "复制详情",
+        "Drive removed" => "磁盘已移除",
+        "Drive disconnected" => "磁盘已断开",
+        "Not reported" => "未报告",
+        "Most important" => "最重要",
+        "All counters" => "全部计数器",
+        "SMART data" => "SMART 数据",
+        "Read speed" => "读取速度",
+        "Read scan" => "读取扫描",
+        "Disk image backup" => "磁盘映像备份",
+        "Disk image restore" => "磁盘映像还原",
+        "File backup" => "文件备份",
+        "File restore" => "文件还原",
+        "Restored files" => "已还原文件",
+        "New folder on the selected volume" => "所选卷上的新文件夹",
+        "Serial number" => "序列号",
+        "unknown maker" => "未知制造商",
+        "USB ID" => "USB ID",
+        "The drive's own counters: errors, temperature, hours, data written" => "磁盘自身的计数器：错误、温度、通电时长、写入量",
+        _ => s,
+    }
+}
 use egui::epaint::CornerRadius;
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2};
@@ -71,7 +186,12 @@ const LIGHT: &str = "light";
 /// Ubuntu Regular for text and Medium for titles and labels (the design's 400 and 500
 /// weights). egui's own Ubuntu Light is thin and uneven at small sizes; it stays for
 /// the two largest headings and as the glyph fallback behind both.
-fn fonts() -> egui::FontDefinitions {
+pub fn fonts() -> egui::FontDefinitions {
+    crate::zhopfont::fonts_with_cjk(project_fonts())
+}
+
+/// The project's own (English) font definitions.
+fn project_fonts() -> egui::FontDefinitions {
     use egui::{FontData, FontFamily};
     let mut f = egui::FontDefinitions::default();
     f.font_data.insert("Ubuntu-Regular".into(), Arc::new(FontData::from_static(include_bytes!("../assets/fonts/Ubuntu-Regular.ttf"))));
@@ -133,19 +253,19 @@ fn apply(s: &mut egui::Style) {
 }
 
 pub fn text(s: impl Into<String>, size: f32, color: Color32) -> RichText {
-    RichText::new(s).size(size).color(color)
+    RichText::new(tr(&s.into())).size(size).color(color)
 }
 
 pub fn medium(s: impl Into<String>, size: f32, color: Color32) -> RichText {
-    RichText::new(s).font(medium_font(size)).color(color)
+    RichText::new(tr(&s.into())).font(medium_font(size)).color(color)
 }
 
 pub fn light(s: impl Into<String>, size: f32, color: Color32) -> RichText {
-    RichText::new(s).font(light_font(size)).color(color)
+    RichText::new(tr(&s.into())).font(light_font(size)).color(color)
 }
 
 pub fn mono(s: impl Into<String>, size: f32, color: Color32) -> RichText {
-    RichText::new(s).monospace().size(size).color(color)
+    RichText::new(tr(&s.into())).monospace().size(size).color(color)
 }
 
 /// One line of text cut with an ellipsis at `max_w`. Colour comes at paint time.

@@ -1,4 +1,4 @@
-//! GUI block map: the drive (or test stream) as a grid of cells, coloured by what
+﻿//! GUI block map: the drive (or test stream) as a grid of cells, coloured by what
 //! is known about each region, with offsets, speed and errors on hover. Also the
 //! speed-by-position graph and the real-vs-claimed capacity bar.
 
@@ -39,28 +39,28 @@ impl State {
     }
     fn short(self) -> &'static str {
         match self {
-            State::Untested => "Untested",
-            State::Read => "Read",
-            State::Written => "Written",
-            State::Verified => "Verified",
-            State::Changed => "Slightly changed",
-            State::Stale => "Old data",
-            State::Aliased => "Aliased",
-            State::Corrupted => "Corrupted",
-            State::Unreadable => "Unreadable",
+            State::Untested => "未测试",
+            State::Read => "已读取",
+            State::Written => "已写入",
+            State::Verified => "已校验",
+            State::Changed => "轻微变化",
+            State::Stale => "旧数据",
+            State::Aliased => "地址回绕",
+            State::Corrupted => "损坏",
+            State::Unreadable => "不可读",
         }
     }
     fn name(self) -> &'static str {
         match self {
-            State::Untested => "Untested",
-            State::Read => "Read, contents not verified",
-            State::Written => "Written, not yet verified",
-            State::Verified => "Verified",
-            State::Changed => "Slightly changed",
-            State::Stale => "Old data (write ignored)",
-            State::Aliased => "Aliased (wraparound)",
-            State::Corrupted => "Corrupted",
-            State::Unreadable => "Unreadable",
+            State::Untested => "未测试",
+            State::Read => "已读取，内容未校验",
+            State::Written => "已写入，尚未校验",
+            State::Verified => "已校验",
+            State::Changed => "轻微变化",
+            State::Stale => "旧数据（写入被忽略）",
+            State::Aliased => "地址回绕（重叠）",
+            State::Corrupted => "损坏",
+            State::Unreadable => "不可读",
         }
     }
     pub fn from_kind(k: &str) -> State {
@@ -203,10 +203,10 @@ pub fn from_report(r: &Report) -> Option<Vec<Cell>> {
                 b'?' => continue,
                 b'w' => (State::Written, None),
                 b'o' => (State::Verified, None),
-                b'a' => (State::Aliased, Some("holds another position's data")),
-                b's' => (State::Stale, Some("old data: the write was ignored")),
-                b'e' => (State::Unreadable, Some("I/O error")),
-                _ => (State::Corrupted, Some("data lost")),
+                b'a' => (State::Aliased, Some("保存了其他位置的数据")),
+                b's' => (State::Stale, Some("旧数据：写入被忽略")),
+                b'e' => (State::Unreadable, Some("I/O 错误")),
+                _ => (State::Corrupted, Some("数据丢失")),
             };
             paint(&mut cells, pos, end.max(pos + 1), state, err);
         }
@@ -218,7 +218,7 @@ pub fn from_report(r: &Report) -> Option<Vec<Cell>> {
             c.state = State::Read;
         }
         for b in &sc.bad_ranges {
-            paint(&mut cells, b.start, b.end, State::Unreadable, Some("unreadable"));
+            paint(&mut cells, b.start, b.end, State::Unreadable, Some("不可读"));
         }
         speeds(&mut cells, sc.stats.speed_map.iter().map(|p| (p.pos, p.mb_s)), true);
         return Some(cells);
@@ -296,9 +296,9 @@ fn tooltip(ui: &mut egui::Ui, c: &Cell) {
         ui.label(k::text(c.state.name(), 12.0, k::TEXT));
     });
     let speed = match (c.read, c.write) {
-        (Some(r), Some(w)) => format!("Read {r:.1} MB/s, write {w:.1} MB/s"),
-        (Some(r), None) => format!("Read {r:.1} MB/s"),
-        (None, Some(w)) => format!("Write {w:.1} MB/s"),
+        (Some(r), Some(w)) => format!("读取 {r:.1} MB/s，写入 {w:.1} MB/s"),
+        (Some(r), None) => format!("读取 {r:.1} MB/s"),
+        (None, Some(w)) => format!("写入 {w:.1} MB/s"),
         _ => String::new(),
     };
     if !speed.is_empty() {
@@ -307,7 +307,7 @@ fn tooltip(ui: &mut egui::Ui, c: &Cell) {
     if !c.errors.is_empty() {
         ui.label(k::text(c.errors.join(", "), 12.0, k::DANGER_ERR));
     } else if c.state != State::Untested {
-        ui.label(k::text("No errors", 12.0, k::OK));
+        ui.label(k::text("无错误", 12.0, k::OK));
     }
 }
 
@@ -337,9 +337,9 @@ pub fn graph(ui: &mut egui::Ui, curves: &[Curve], temps: &[[f64; 2]], w: f32) {
     ui.spacing_mut().item_spacing.y = 8.0;
     let (head, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
     let p = ui.painter();
-    k::paint_medium(p, head.left_center(), egui::Align2::LEFT_CENTER, "Speed (MB/s) by position", 12.0, k::TEXT3);
+    k::paint_medium(p, head.left_center(), egui::Align2::LEFT_CENTER, "速度（MB/s）按位置", 12.0, k::TEXT3);
     let mut x = head.right();
-    for (read, name, color) in [(None, "Temp", k::ORANGE), (Some(true), "Read", k::OK), (Some(false), "Write", k::ACCENT)] {
+    for (read, name, color) in [(None, "温度", k::ORANGE), (Some(true), "已读取", k::OK), (Some(false), "写入", k::ACCENT)] {
         let shown = match read {
             Some(r) => curves.iter().any(|c| c.read == r && c.pts.len() > 1),
             None => temps.len() > 1,
@@ -375,10 +375,10 @@ pub fn graph(ui: &mut egui::Ui, curves: &[Curve], temps: &[[f64; 2]], w: f32) {
         .include_y(0.0)
         .x_grid_spacer(egui_plot::log_grid_spacer(5))
         .y_grid_spacer(egui_plot::log_grid_spacer(5))
-        .x_axis_label(k::text("position (GB)", 10.0, k::TEXT3))
+        .x_axis_label(k::text("位置（GB）", 10.0, k::TEXT3))
         .show(ui, |pl| {
             for (read, pts) in lines {
-                let (name, color) = if read { ("Read", k::OK) } else { ("Write", k::ACCENT) };
+                let (name, color) = if read { ("已读取", k::OK) } else { ("写入", k::ACCENT) };
                 pl.line(egui_plot::Line::new(name, pts).color(color).width(1.5));
             }
             // A new pass starts again at position 0: one line per run of rising positions.
@@ -386,7 +386,7 @@ pub fn graph(ui: &mut egui::Ui, curves: &[Curve], temps: &[[f64; 2]], w: f32) {
             for t in temps.iter().chain([&[f64::NEG_INFINITY, 0.0]]) {
                 if seg.last().is_some_and(|l| t[0] < l[0]) {
                     if seg.len() > 1 {
-                        pl.line(egui_plot::Line::new("Temp", std::mem::take(&mut seg)).color(k::ORANGE).width(1.5));
+                        pl.line(egui_plot::Line::new("温度", std::mem::take(&mut seg)).color(k::ORANGE).width(1.5));
                     }
                     seg.clear();
                 }
@@ -398,7 +398,7 @@ pub fn graph(ui: &mut egui::Ui, curves: &[Curve], temps: &[[f64; 2]], w: f32) {
 /// Real vs claimed capacity (capacity probe results).
 pub fn capacity(ui: &mut egui::Ui, real: u64, claimed: u64, w: f32) {
     ui.spacing_mut().item_spacing.y = 6.0;
-    ui.label(k::medium("Real vs claimed capacity", 12.0, k::TEXT3));
+    ui.label(k::medium("实际容量与标称容量", 12.0, k::TEXT3));
     let (bar, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
     let frac = if claimed > 0 { (real as f64 / claimed as f64).clamp(0.0, 1.0) as f32 } else { 0.0 };
     let gw = (bar.width() * frac).max(5.0).min(bar.width());
@@ -409,9 +409,9 @@ pub fn capacity(ui: &mut egui::Ui, real: u64, claimed: u64, w: f32) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(k::medium(size(real), 22.0, k::OK));
-        ui.label(k::text("stores data", 12.0, k::TEXT2));
+        ui.label(k::text("可存储数据", 12.0, k::TEXT2));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(k::text("claimed", 12.0, k::TEXT2));
+            ui.label(k::text("标称", 12.0, k::TEXT2));
             ui.label(k::medium(size(claimed), 22.0, k::TEXT));
         });
     });
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn read_checks_never_mark_data_written_or_verified() {
         use super::*;
-        let status = Live { phase: "Scanning (read-only)".into(), total: 128 << 20, done: 64 << 20, marks: vec![(0, 4096, "unreadable".into())], ..Default::default() };
+        let status = Live { phase: "Scanning (read-only)".into(), total: 128 << 20, done: 64 << 20, marks: vec![(0, 4096, "不可读".into())], ..Default::default() };
         let cells = live(&status, &[], true).unwrap();
         assert_eq!(cells[0].state, State::Unreadable);
         assert_eq!(cells[1].state, State::Read);

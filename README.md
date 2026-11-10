@@ -218,6 +218,7 @@ Cheap fakes ignore the high address bits, so writes past the real capacity wrap 
 - **Linux in QEMU/KVM** with a real USB stick passed through, installed or booted live from a USB stick: AlmaLinux 10, Alpine 3.24, Arch, Bazzite, Chimera, Debian (on RAID, LUKS and LVM), EndeavourOS, Gentoo, Guix System 1.5, Kali 2026.2, Linux Mint 22, Manjaro, NixOS 26.05, OpenWrt (x86), openSUSE Tumbleweed, Rocky Linux 10, Slackware, SystemRescue, Tiny Core 17, Ubuntu 22.04 and 26.04, Void (glibc and musl) and Zorin OS 18. Kernels 5.15 to 7.2.
 - **Docker:** works with `docker run --privileged -v /dev:/dev`. Without the host's `/dev`, FlashTester can't tell which disks the host uses and refuses all of them.
 - **FreeBSD** in QEMU/KVM: 13.5, 14.4, 14.5, 15.0, 15.1 and 16.0-CURRENT. The GUI on 14.4 to 16.0-CURRENT under Xvfb, and on 14.5 with the openbox window manager and through `pkexec` and `doas`.
+- **Haiku** R1/beta5 in QEMU/KVM, command line: emulated USB stick and IDE disk as whole disks, and files on a BFS volume.
 - Fake drives (wraparound, dropped writes, read-only) are covered by unit tests on a simulated drive.
 
 ## Building

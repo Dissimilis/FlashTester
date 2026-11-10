@@ -431,6 +431,7 @@ pub struct RawDisk {
     pub size: u64,
     pub sector: u32,
     pub id: String,
+    writable: bool,
 }
 
 impl RawDisk {
@@ -456,11 +457,14 @@ impl RawDisk {
         let mut g = Geometry::default();
         let _ = ctl(&f, B_GET_GEOMETRY, &mut g);
         let size = Some(size_of(&f, &g)).filter(|&s| s > 0).unwrap_or(d.size);
-        Ok(RawDisk { file: f, size, sector: d.sector_size.max(512), id: d.id.clone() })
+        Ok(RawDisk { file: f, size, sector: d.sector_size.max(512), id: d.id.clone(), writable: write })
     }
 }
 
 impl Dev for RawDisk {
+    fn fork(&mut self) -> io::Result<Box<dyn Dev>> {
+        Ok(Box::new(crate::dev::IoHandle { file: self.worker(self.writable)?, size: self.size, alignment: self.align(), writable: self.writable }))
+    }
     fn len(&self) -> u64 {
         self.size
     }
